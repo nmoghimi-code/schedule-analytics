@@ -106,6 +106,9 @@ class ScheduleAnalysisApp(tk.Tk):
         self.narrative_button = ttk.Button(run_row, text="Generate Narrative Report", command=self._generate_narrative)
         self.narrative_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
+        self.netcheck_button = ttk.Button(run_row, text="Check Network", command=self._check_network)
+        self.netcheck_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+
         results_frame = ttk.LabelFrame(root, text="Results", padding=10)
         results_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         results_frame.columnconfigure(0, weight=1)
@@ -244,6 +247,28 @@ class ScheduleAnalysisApp(tk.Tk):
         self.results.delete("1.0", "end")
         self.results.insert("1.0", text)
         self.results.configure(state="disabled")
+
+    def _check_network(self) -> None:
+        self.status_var.set("Checking network...")
+        self.netcheck_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                info = ne.probe_gemini_connectivity(timeout_s=5)
+                text = json.dumps(info, indent=2, default=str)
+            except Exception as exc:
+                info = {"error": str(exc)}
+                text = json.dumps(info, indent=2, default=str)
+
+            def done() -> None:
+                self.netcheck_button.configure(state="normal")
+                self.status_var.set("Network check complete.")
+                self._write_results({"network_probe": info})
+                messagebox.showinfo("Network Check", text)
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_close(self) -> None:
         try:

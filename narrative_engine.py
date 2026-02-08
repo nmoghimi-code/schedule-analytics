@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import platform
+import socket
 import sys
 import time
 import warnings
@@ -65,6 +66,87 @@ def _get_logger() -> logging.Logger:
     except Exception:
         logger.addHandler(logging.NullHandler())
     return logger
+
+
+def probe_gemini_connectivity(
+    *,
+    url: str = "https://generativelanguage.googleapis.com",
+    timeout_s: int = 5,
+) -> dict[str, Any]:
+    """
+    Lightweight network probe to help diagnose corporate proxies (e.g., Zscaler) without needing logs.
+
+    This does NOT require an API key. It checks:
+      - DNS resolution
+      - HTTPS reachability and latency
+      - Whether the response resembles a proxy block page
+    """
+    out: dict[str, Any] = {
+        "url": url,
+        "timeout_s": int(timeout_s),
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+    }
+
+    host = url.replace("https://", "").replace("http://", "").split("/", 1)[0]
+    out["host"] = host
+
+    # DNS
+    t0 = time.perf_counter()
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ips = sorted({info[4][0] for info in infos if info and info[4]})
+        out["dns_ok"] = True
+        out["dns_s"] = round(time.perf_counter() - t0, 3)
+        out["resolved_ips"] = ips[:10]
+    except Exception as e:
+        out["dns_ok"] = False
+        out["dns_s"] = round(time.perf_counter() - t0, 3)
+        out["dns_error"] = str(e)
+        return out
+
+    # HTTPS GET
+    req = urllib.request.Request(url=url, method="GET", headers={"User-Agent": "ScheduleAnalytics/1.0"})
+    t1 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            out["http_ok"] = True
+            out["http_s"] = round(time.perf_counter() - t1, 3)
+            out["status"] = int(getattr(resp, "status", 0) or 0)
+            headers = dict(resp.headers.items())
+            out["server_header"] = headers.get("Server") or headers.get("server")
+            # Read only a small sample to avoid big downloads.
+            sample = resp.read(1024).decode("utf-8", errors="replace")
+            out["body_sample"] = sample[:300]
+
+            sample_lc = sample.casefold()
+            out["likely_proxy_block"] = any(
+                s in sample_lc
+                for s in [
+                    "zscaler",
+                    "access denied",
+                    "blocked",
+                    "forbidden",
+                    "your request was blocked",
+                    "policy",
+                ]
+            )
+    except urllib.error.HTTPError as e:
+        out["http_ok"] = True
+        out["http_s"] = round(time.perf_counter() - t1, 3)
+        out["status"] = int(e.code)
+        try:
+            body = e.read(1024).decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        out["body_sample"] = body[:300]
+        body_lc = body.casefold()
+        out["likely_proxy_block"] = any(s in body_lc for s in ["zscaler", "access denied", "blocked", "policy"])
+    except Exception as e:
+        out["http_ok"] = False
+        out["http_s"] = round(time.perf_counter() - t1, 3)
+        out["http_error"] = str(e)
+    return out
 
 
 SYSTEM_REPORT_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a proactive schedule narrative for an owner/GC report.
