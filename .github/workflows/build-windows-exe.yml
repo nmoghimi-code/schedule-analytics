@@ -29,7 +29,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python -c "import os; from pathlib import Path; key=(os.environ.get('GEMINI_API_KEY') or '').strip(); (key and Path('scheduleanalytics_secrets.py').write_text('EMBEDDED_GEMINI_API_KEY = ' + repr(key) + '\\n', encoding='utf-8')) or (_ for _ in ()).throw(SystemExit('Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).'))"
+          python -c "import os; from pathlib import Path; key=(os.environ.get('GEMINI_API_KEY') or '').strip(); (key and Path('scheduleanalytics_secrets.py').write_text('EMBEDDED_GEMINI_API_KEY = ' + repr(key) + '\n', encoding='utf-8')) or (_ for _ in ()).throw(SystemExit('Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).'))"
           python -c "import scheduleanalytics_secrets as s, sys; k=getattr(s,'EMBEDDED_GEMINI_API_KEY',''); print('Injected key length:', len(k)); sys.exit(0 if k else 1)"
 
       - name: Build EXE
