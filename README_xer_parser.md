@@ -25,3 +25,12 @@ To reliably grab all activities under the highest-level WBS section containing t
 - The workflow file is `.github/workflows/build-windows-exe.yml`.
 - Trigger it from GitHub: **Actions → Build Windows EXE (PyInstaller) → Run workflow**.
 - Download the artifact `ScheduleAnalytics-windows-exe` and run `ScheduleAnalytics.exe`.
+
+## Build a macOS single-file executable (GitHub Actions)
+
+- The workflow file is `.github/workflows/build-macos-exe.yml`.
+- Trigger it from GitHub: **Actions → Build macOS EXE (PyInstaller) → Run workflow**.
+- Download the artifact for your Mac:
+  - `ScheduleAnalytics-macos-13` (Intel Macs)
+  - `ScheduleAnalytics-macos-14` (Apple Silicon Macs)
+- Run: `./ScheduleAnalytics`
