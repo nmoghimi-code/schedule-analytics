@@ -8,12 +8,7 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-13 is retired; use the supported Intel and Apple Silicon runner labels.
-        os: [macos-15-intel, macos-15]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,17 +24,35 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
-      - name: Build EXE
+      - name: Build (native arch)
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
+          file dist/ScheduleAnalytics
+
+      - name: Build (x86_64 via Rosetta)
+        run: |
+          mkdir -p dist_x86
+          arch -x86_64 python -m pip install --upgrade pip
+          arch -x86_64 python -m pip install -r requirements.txt
+          arch -x86_64 python -m pip install pyinstaller
+          arch -x86_64 pyinstaller --noconfirm --clean --onefile --windowed --name ScheduleAnalytics-x86_64 main.py
+          chmod +x dist/ScheduleAnalytics-x86_64
+          file dist/ScheduleAnalytics-x86_64
 
       - name: SHA256
         run: |
           shasum -a 256 dist/ScheduleAnalytics
+          shasum -a 256 dist/ScheduleAnalytics-x86_64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScheduleAnalytics-${{ matrix.os }}
+          name: ScheduleAnalytics-macos
           path: dist/ScheduleAnalytics
+
+      - name: Upload artifact (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScheduleAnalytics-macos-x86_64
+          path: dist/ScheduleAnalytics-x86_64

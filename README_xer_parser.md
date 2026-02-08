@@ -31,6 +31,6 @@ To reliably grab all activities under the highest-level WBS section containing t
 - The workflow file is `.github/workflows/build-macos-exe.yml`.
 - Trigger it from GitHub: **Actions → Build macOS EXE (PyInstaller) → Run workflow**.
 - Download the artifact for your Mac:
-  - `ScheduleAnalytics-macos-15-intel` (Intel Macs)
-  - `ScheduleAnalytics-macos-15` (Apple Silicon Macs)
-- Run: `./ScheduleAnalytics`
+  - `ScheduleAnalytics-macos` (native architecture of the GitHub runner)
+  - `ScheduleAnalytics-macos-x86_64` (Intel build via Rosetta)
+- Run: `./ScheduleAnalytics` (or `./ScheduleAnalytics-x86_64`)
