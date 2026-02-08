@@ -37,6 +37,7 @@ jobs:
             raise SystemExit("Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).")
           Path("scheduleanalytics_secrets.py").write_text(f'EMBEDDED_GEMINI_API_KEY = {key!r}\n', encoding="utf-8")
           PY
+          python -c "import scheduleanalytics_secrets as s, sys; k=getattr(s,'EMBEDDED_GEMINI_API_KEY',''); print('Injected key length:', len(k)); sys.exit(0 if k else 1)"
 
       - name: Build (native arch)
         run: |

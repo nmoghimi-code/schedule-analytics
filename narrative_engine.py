@@ -164,12 +164,43 @@ def find_api_key() -> str | None:
     return None
 
 
+def _key_diagnostics() -> dict[str, Any]:
+    def normalize(value: str | None) -> str | None:
+        v = (value or "").strip().strip("'").strip('"').strip()
+        if not v:
+            return None
+        if v in {"YOUR_REAL_KEY_HERE", "your_key_here"}:
+            return None
+        return v
+
+    diag: dict[str, Any] = {}
+    diag["embedded_constant_set"] = bool(normalize(EMBEDDED_GEMINI_API_KEY))
+    diag["env_var_set"] = bool(normalize(os.getenv(API_KEY_ENV_VAR)))
+    diag["dotenv_candidates"] = _candidate_dotenv_paths()
+    diag["dotenv_found"] = []
+    for p in diag["dotenv_candidates"]:
+        try:
+            if os.path.exists(p):
+                diag["dotenv_found"].append(p)
+        except Exception:
+            continue
+    diag["secrets_module_imported"] = bool(_secrets is not None)
+    try:
+        diag["secrets_module_key_set"] = bool(
+            normalize(getattr(_secrets, "EMBEDDED_GEMINI_API_KEY", None) if _secrets else None)
+        )
+    except Exception:
+        diag["secrets_module_key_set"] = False
+    return diag
+
+
 def _get_api_key(api_key: str | None = None) -> str:
     key = (api_key or find_api_key() or "").strip()
     if not key:
         raise RuntimeError(
             "Missing Gemini API key. Set environment variable GEMINI_API_KEY, or create a local .env file "
-            "with GEMINI_API_KEY=..., or pass api_key=... to generate_narrative()."
+            "with GEMINI_API_KEY=..., or pass api_key=... to generate_narrative().\n\n"
+            f"Diagnostics: {json.dumps(_key_diagnostics(), indent=2)}"
         )
     return key
 
