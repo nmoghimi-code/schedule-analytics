@@ -6,6 +6,16 @@ import sys
 import warnings
 from typing import Any, Mapping
 
+try:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        import google.generativeai as genai  # type: ignore
+
+    _GENAI_IMPORT_ERROR: Exception | None = None
+except Exception as _e:  # pragma: no cover
+    genai = None  # type: ignore[assignment]
+    _GENAI_IMPORT_ERROR = _e
+
 
 SYSTEM_REPORT_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a proactive schedule narrative for an owner/GC report.
 Your goal is to tell a clear, defensible story of project health and the “why” behind movement, using ONLY the provided JSON.
@@ -138,14 +148,10 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
     """
     key = _get_api_key(api_key)
 
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=FutureWarning)
-            import google.generativeai as genai  # type: ignore
-    except Exception as e:  # pragma: no cover
+    if genai is None:  # pragma: no cover
         raise RuntimeError(
             "Missing dependency 'google-generativeai'. Install it with: pip install google-generativeai"
-        ) from e
+        ) from _GENAI_IMPORT_ERROR
 
     genai.configure(api_key=key)
 
