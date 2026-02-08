@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import platform
 import sys
+import time
 import warnings
 import urllib.error
 import urllib.request
@@ -28,6 +31,40 @@ except Exception:  # pragma: no cover
 # If set, the app can generate narratives without requiring users to enter a key or set up a proxy.
 # WARNING: Any key embedded in a desktop app can be extracted by end users. Do not use this for production.
 EMBEDDED_GEMINI_API_KEY = ""
+
+LOG_NAME = "schedule_analytics"
+
+
+def _log_path() -> str:
+    system = platform.system()
+    if system == "Windows":
+        base = os.getenv("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "ScheduleAnalytics", "schedule_analytics.log")
+    if system == "Darwin":
+        return os.path.join(
+            os.path.expanduser("~"),
+            "Library",
+            "Application Support",
+            "ScheduleAnalytics",
+            "schedule_analytics.log",
+        )
+    return os.path.join(os.path.expanduser("~"), ".schedule_analytics", "schedule_analytics.log")
+
+
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger(LOG_NAME)
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    try:
+        path = _log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    except Exception:
+        logger.addHandler(logging.NullHandler())
+    return logger
 
 
 SYSTEM_REPORT_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a proactive schedule narrative for an owner/GC report.
@@ -218,17 +255,25 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
             "Missing dependency 'google-generativeai'. Install it with: pip install google-generativeai"
         ) from _GENAI_IMPORT_ERROR
 
+    logger = _get_logger()
+    t0 = time.perf_counter()
+
     genai.configure(api_key=key)
 
     # Keep payload compact to reduce request size / latency.
     user_content = json.dumps(data_digest, default=str)
+    payload_bytes = len(user_content.encode("utf-8", errors="ignore"))
+    logger.info("Gemini start model=%s payload_bytes=%s", model, payload_bytes)
 
     # google-generativeai supports system_instruction on GenerativeModel.
     model_obj = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_REPORT_GUIDELINES)
     try:
+        t_call = time.perf_counter()
         resp = model_obj.generate_content(user_content, request_options={"timeout": 120})
+        logger.info("Gemini ok model=%s call_s=%.3f total_s=%.3f", model, time.perf_counter() - t_call, time.perf_counter() - t0)
     except Exception as e:
         msg = str(e)
+        logger.error("Gemini error model=%s payload_bytes=%s total_s=%.3f err=%s", model, payload_bytes, time.perf_counter() - t0, msg)
         if "429" in msg or "quota" in msg.lower():
             raise RuntimeError(
                 "Gemini quota/rate-limit hit (HTTP 429). Try again later, or switch to a lower-tier model "
@@ -262,12 +307,15 @@ def generate_narrative_via_proxy(
     """
     Call a backend proxy that holds the Gemini API key, authenticated with a per-user token.
     """
+    logger = _get_logger()
+    t0 = time.perf_counter()
     url = proxy_url.strip().rstrip("/") + "/v1/narrative"
     token = user_token.strip()
     if not token:
         raise RuntimeError("Missing user token for narrative proxy.")
 
     body = json.dumps({"data_digest": data_digest, "model": model}, default=str).encode("utf-8")
+    logger.info("Proxy start model=%s body_bytes=%s url=%s", model, len(body), url)
     req = urllib.request.Request(
         url=url,
         data=body,
@@ -280,10 +328,13 @@ def generate_narrative_via_proxy(
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
+        logger.info("Proxy ok model=%s total_s=%.3f", model, time.perf_counter() - t0)
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", errors="replace")
+        logger.error("Proxy http_error code=%s total_s=%.3f body=%s", e.code, time.perf_counter() - t0, msg)
         raise RuntimeError(f"Proxy error {e.code}: {msg}") from e
     except urllib.error.URLError as e:
+        logger.error("Proxy url_error total_s=%.3f err=%s", time.perf_counter() - t0, str(e))
         raise RuntimeError(f"Could not reach proxy: {e}") from e
 
     data = json.loads(raw)

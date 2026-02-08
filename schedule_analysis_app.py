@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 import platform
@@ -293,6 +294,7 @@ class ScheduleAnalysisApp(tk.Tk):
         self.status_var.set("Generating narrative...")
         self.narrative_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
+        t0 = time.perf_counter()
 
         def worker() -> None:
             try:
@@ -309,20 +311,28 @@ class ScheduleAnalysisApp(tk.Tk):
                     narrative = ne.generate_narrative(digest, model=model)
             except Exception as exc:
                 msg = str(exc)
-                self.after(0, lambda m=msg: self._on_narrative_error(m))
+                elapsed = time.perf_counter() - t0
+                self.after(0, lambda m=msg, s=elapsed: self._on_narrative_error(m, elapsed_s=s))
                 return
-            self.after(0, lambda: self._show_narrative_window(narrative))
+            elapsed = time.perf_counter() - t0
+            self.after(0, lambda s=elapsed: self._show_narrative_window(narrative, elapsed_s=s))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_narrative_error(self, msg: str) -> None:
-        self.status_var.set("Error.")
+    def _on_narrative_error(self, msg: str, *, elapsed_s: float | None = None) -> None:
+        if elapsed_s is None:
+            self.status_var.set("Error.")
+        else:
+            self.status_var.set(f"Error after {elapsed_s:.1f}s.")
         self.narrative_button.configure(state="normal")
         self.run_button.configure(state="normal")
         messagebox.showerror("Narrative Error", msg)
 
-    def _show_narrative_window(self, narrative: str) -> None:
-        self.status_var.set("Narrative ready.")
+    def _show_narrative_window(self, narrative: str, *, elapsed_s: float | None = None) -> None:
+        if elapsed_s is None:
+            self.status_var.set("Narrative ready.")
+        else:
+            self.status_var.set(f"Narrative ready ({elapsed_s:.1f}s).")
         self.narrative_button.configure(state="normal")
         self.run_button.configure(state="normal")
 
