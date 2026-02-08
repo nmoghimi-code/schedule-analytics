@@ -220,11 +220,26 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
 
     genai.configure(api_key=key)
 
-    user_content = json.dumps(data_digest, indent=2, default=str)
+    # Keep payload compact to reduce request size / latency.
+    user_content = json.dumps(data_digest, default=str)
 
     # google-generativeai supports system_instruction on GenerativeModel.
     model_obj = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_REPORT_GUIDELINES)
-    resp = model_obj.generate_content(user_content)
+    try:
+        resp = model_obj.generate_content(user_content, request_options={"timeout": 120})
+    except Exception as e:
+        msg = str(e)
+        if "429" in msg or "quota" in msg.lower():
+            raise RuntimeError(
+                "Gemini quota/rate-limit hit (HTTP 429). Try again later, or switch to a lower-tier model "
+                "like gemini-2.5-flash, or reduce usage."
+            ) from e
+        if "timed out" in msg.lower() or "timeout" in msg.lower():
+            raise RuntimeError(
+                "Gemini request timed out. Check your internet/firewall and try gemini-2.5-flash. "
+                "If you are on a corporate network, the Gemini endpoint may be blocked."
+            ) from e
+        raise
 
     text = getattr(resp, "text", None)
     if not text:

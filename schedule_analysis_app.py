@@ -305,6 +305,7 @@ class ScheduleAnalysisApp(tk.Tk):
                         model=model,
                     )
                 else:
+                    # Direct Gemini calls can take a while depending on model + network.
                     narrative = ne.generate_narrative(digest, model=model)
             except Exception as exc:
                 msg = str(exc)
