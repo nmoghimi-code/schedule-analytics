@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14] # 13=intel, 14=apple silicon
+        # macos-13 is retired; use the supported Intel and Apple Silicon runner labels.
+        os: [macos-15-intel, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -42,4 +43,3 @@ jobs:
         with:
           name: ScheduleAnalytics-${{ matrix.os }}
           path: dist/ScheduleAnalytics
-
