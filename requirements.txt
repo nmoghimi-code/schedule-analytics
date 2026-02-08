@@ -1,3 +1,4 @@
 pandas>=2.3.0
 google-generativeai>=0.8.0
-
+truststore>=0.10.0; platform_system=="Windows"
+python-certifi-win32>=1.6.0; platform_system=="Windows"

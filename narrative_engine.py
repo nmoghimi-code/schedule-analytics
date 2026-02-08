@@ -37,6 +37,42 @@ EMBEDDED_GEMINI_API_KEY = ""
 
 LOG_NAME = "schedule_analytics"
 _RECENT_LOG_LINES: deque[str] = deque(maxlen=400)
+_WINDOWS_TLS_CONFIGURED = False
+
+
+def _configure_windows_tls_trust() -> None:
+    """
+    On some Windows corporate networks, HTTPS is intercepted (MITM) with a custom root cert.
+
+    urllib can succeed using the OS trust store, while requests/certifi fails with:
+    SSLCertVerificationError: unable to get local issuer certificate
+
+    Fix: use the Windows trust store for Python HTTPS (via truststore), with a fallback to certifi-win32.
+    """
+    global _WINDOWS_TLS_CONFIGURED
+    if _WINDOWS_TLS_CONFIGURED:
+        return
+    _WINDOWS_TLS_CONFIGURED = True
+
+    if platform.system() != "Windows":
+        return
+
+    logger = _get_logger()
+    try:
+        import truststore  # type: ignore
+
+        truststore.inject_into_ssl()
+        logger.info("TLS trust: truststore injected into ssl")
+        return
+    except Exception as e:
+        logger.info("TLS trust: truststore not available (%s)", str(e))
+
+    try:
+        import certifi_win32  # type: ignore  # noqa: F401
+
+        logger.info("TLS trust: certifi_win32 loaded")
+    except Exception as e:
+        logger.info("TLS trust: certifi_win32 not available (%s)", str(e))
 
 
 def _log_path() -> str:
@@ -197,6 +233,21 @@ def probe_gemini_connectivity(
         out["api_ok"] = False
         out["api_s"] = round(time.perf_counter() - t2, 3)
         out["api_error"] = str(e)
+
+    # requests-based probe (mirrors what google-generativeai uses under the hood for REST).
+    _configure_windows_tls_trust()
+    try:
+        import requests  # type: ignore
+
+        t3 = time.perf_counter()
+        r = requests.get(api_url, timeout=timeout_s, headers={"User-Agent": "ScheduleAnalytics/1.0"})
+        out["requests_ok"] = True
+        out["requests_s"] = round(time.perf_counter() - t3, 3)
+        out["requests_status"] = int(getattr(r, "status_code", 0) or 0)
+        out["requests_body_sample"] = (r.text or "")[:300]
+    except Exception as e:
+        out["requests_ok"] = False
+        out["requests_error"] = str(e)
 
     return out
 
@@ -407,6 +458,8 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
 
     logger = _get_logger()
     t0 = time.perf_counter()
+
+    _configure_windows_tls_trust()
 
     transport = _select_genai_transport()
     try:
