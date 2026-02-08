@@ -8,6 +8,7 @@ EXEFILES/
 __pycache__/
 *.pyc
 scheduleanalytics_secrets.py
+scheduleanalytics_build.py
 build/
 dist/
 *.spec

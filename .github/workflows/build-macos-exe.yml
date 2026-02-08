@@ -39,9 +39,21 @@ jobs:
           PY
           python -c "import scheduleanalytics_secrets as s, sys; k=getattr(s,'EMBEDDED_GEMINI_API_KEY',''); print('Injected key length:', len(k)); sys.exit(0 if k else 1)"
 
+      - name: Inject build info (build-time)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import datetime
+          from pathlib import Path
+          sha = (os.environ.get("GITHUB_SHA") or "").strip()
+          ts = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+          Path("scheduleanalytics_build.py").write_text(f"BUILD_SHA = {sha!r}\nBUILD_TIME_UTC = {ts!r}\n", encoding="utf-8")
+          PY
+
       - name: Build (native arch)
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 

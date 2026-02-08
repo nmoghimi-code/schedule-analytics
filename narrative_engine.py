@@ -10,6 +10,8 @@ import time
 import warnings
 import urllib.error
 import urllib.request
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Mapping
 
 try:
@@ -34,6 +36,7 @@ except Exception:  # pragma: no cover
 EMBEDDED_GEMINI_API_KEY = ""
 
 LOG_NAME = "schedule_analytics"
+_RECENT_LOG_LINES: deque[str] = deque(maxlen=400)
 
 
 def _log_path() -> str:
@@ -57,15 +60,38 @@ def _get_logger() -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(logging.INFO)
+    logger.propagate = False
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    class _RecentLogHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover
+            try:
+                _RECENT_LOG_LINES.append(fmt.format(record))
+            except Exception:
+                pass
+
+    logger.addHandler(_RecentLogHandler())
     try:
         path = _log_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         handler = logging.FileHandler(path, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        handler.setFormatter(fmt)
         logger.addHandler(handler)
     except Exception:
         logger.addHandler(logging.NullHandler())
     return logger
+
+
+def get_recent_logs(*, max_lines: int = 200) -> str:
+    """
+    Returns recent in-memory log lines (useful when users can't access log files).
+    """
+    try:
+        n = max(1, min(int(max_lines), 400))
+    except Exception:
+        n = 200
+    lines = list(_RECENT_LOG_LINES)[-n:]
+    return "\n".join(lines)
 
 
 def probe_gemini_connectivity(
@@ -86,6 +112,8 @@ def probe_gemini_connectivity(
         "timeout_s": int(timeout_s),
         "platform": platform.platform(),
         "python": sys.version.split()[0],
+        "genai_transport_env": (os.getenv(GENAI_TRANSPORT_ENV_VAR) or ""),
+        "genai_transport_selected": _select_genai_transport() or "default",
     }
 
     host = url.replace("https://", "").replace("http://", "").split("/", 1)[0]
@@ -146,6 +174,30 @@ def probe_gemini_connectivity(
         out["http_ok"] = False
         out["http_s"] = round(time.perf_counter() - t1, 3)
         out["http_error"] = str(e)
+
+    # API-path probe (no API key). Expect 401/403 if reachable.
+    api_url = url.rstrip("/") + "/v1beta/models"
+    req2 = urllib.request.Request(url=api_url, method="GET", headers={"User-Agent": "ScheduleAnalytics/1.0"})
+    t2 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req2, timeout=timeout_s) as resp2:
+            out["api_ok"] = True
+            out["api_s"] = round(time.perf_counter() - t2, 3)
+            out["api_status"] = int(getattr(resp2, "status", 0) or 0)
+            out["api_body_sample"] = resp2.read(512).decode("utf-8", errors="replace")[:300]
+    except urllib.error.HTTPError as e:
+        out["api_ok"] = True
+        out["api_s"] = round(time.perf_counter() - t2, 3)
+        out["api_status"] = int(e.code)
+        try:
+            out["api_body_sample"] = e.read(512).decode("utf-8", errors="replace")[:300]
+        except Exception:
+            out["api_body_sample"] = ""
+    except Exception as e:
+        out["api_ok"] = False
+        out["api_s"] = round(time.perf_counter() - t2, 3)
+        out["api_error"] = str(e)
+
     return out
 
 
@@ -193,6 +245,22 @@ Required narrative structure (use headings):
 
 DOTENV_FILENAME = ".env"
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
+GENAI_TRANSPORT_ENV_VAR = "SCHEDULE_ANALYTICS_GENAI_TRANSPORT"
+
+
+def _select_genai_transport() -> str | None:
+    """
+    Choose a transport for google-generativeai.
+
+    Why: On some Windows networks, gRPC/HTTP2 can stall while plain REST works.
+    Override with SCHEDULE_ANALYTICS_GENAI_TRANSPORT=grpc|rest|grpc_asyncio|auto.
+    """
+    raw = (os.getenv(GENAI_TRANSPORT_ENV_VAR) or "").strip().casefold()
+    if raw in {"", "auto"}:
+        return "rest" if platform.system() == "Windows" else None
+    if raw in {"rest", "grpc", "grpc_asyncio"}:
+        return raw
+    return None
 
 
 def _read_dotenv_key(dotenv_path: str = DOTENV_FILENAME, env_var: str = API_KEY_ENV_VAR) -> str | None:
@@ -340,22 +408,60 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
     logger = _get_logger()
     t0 = time.perf_counter()
 
-    genai.configure(api_key=key)
+    transport = _select_genai_transport()
+    try:
+        if transport:
+            genai.configure(api_key=key, transport=transport)
+        else:
+            genai.configure(api_key=key)
+    except TypeError:
+        # Backward-compat for older google-generativeai versions that don't accept transport=.
+        genai.configure(api_key=key)
+        transport = None
 
     # Keep payload compact to reduce request size / latency.
     user_content = json.dumps(data_digest, default=str)
     payload_bytes = len(user_content.encode("utf-8", errors="ignore"))
-    logger.info("Gemini start model=%s payload_bytes=%s", model, payload_bytes)
+    logger.info("Gemini start model=%s transport=%s payload_bytes=%s", model, transport or "default", payload_bytes)
 
     # google-generativeai supports system_instruction on GenerativeModel.
     model_obj = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_REPORT_GUIDELINES)
     try:
         t_call = time.perf_counter()
-        resp = model_obj.generate_content(user_content, request_options={"timeout": 120})
-        logger.info("Gemini ok model=%s call_s=%.3f total_s=%.3f", model, time.perf_counter() - t_call, time.perf_counter() - t0)
+        # Some environments ignore SDK-level timeouts (especially with gRPC/HTTP2).
+        # Add a hard timeout so the UI doesn't hang indefinitely.
+        request_timeout_s = 120
+        hard_timeout_s = 150
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(model_obj.generate_content, user_content, request_options={"timeout": request_timeout_s})
+            resp = fut.result(timeout=hard_timeout_s)
+        logger.info(
+            "Gemini ok model=%s call_s=%.3f total_s=%.3f",
+            model,
+            time.perf_counter() - t_call,
+            time.perf_counter() - t0,
+        )
+    except FutureTimeoutError as e:
+        logger.error(
+            "Gemini timeout model=%s transport=%s total_s=%.3f",
+            model,
+            transport or "default",
+            time.perf_counter() - t0,
+        )
+        raise RuntimeError(
+            "Gemini call timed out (hard timeout). On some Windows networks, gRPC/HTTP2 stalls even when HTTPS works. "
+            "Try setting environment variable SCHEDULE_ANALYTICS_GENAI_TRANSPORT=rest and retry."
+        ) from e
     except Exception as e:
         msg = str(e)
-        logger.error("Gemini error model=%s payload_bytes=%s total_s=%.3f err=%s", model, payload_bytes, time.perf_counter() - t0, msg)
+        logger.error(
+            "Gemini error model=%s transport=%s payload_bytes=%s total_s=%.3f err=%s",
+            model,
+            transport or "default",
+            payload_bytes,
+            time.perf_counter() - t0,
+            msg,
+        )
         if "429" in msg or "quota" in msg.lower():
             raise RuntimeError(
                 "Gemini quota/rate-limit hit (HTTP 429). Try again later, or switch to a lower-tier model "

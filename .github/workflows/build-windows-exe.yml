@@ -32,9 +32,14 @@ jobs:
           python -c "import os; from pathlib import Path; key=(os.environ.get('GEMINI_API_KEY') or '').strip(); (key and Path('scheduleanalytics_secrets.py').write_text('EMBEDDED_GEMINI_API_KEY = ' + repr(key) + '\n', encoding='utf-8')) or (_ for _ in ()).throw(SystemExit('Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).'))"
           python -c "import scheduleanalytics_secrets as s, sys; k=getattr(s,'EMBEDDED_GEMINI_API_KEY',''); print('Injected key length:', len(k)); sys.exit(0 if k else 1)"
 
+      - name: Inject build info (build-time)
+        shell: pwsh
+        run: |
+          python -c "from pathlib import Path; import os, datetime; sha=os.environ.get('GITHUB_SHA','').strip(); ts=datetime.datetime.utcnow().replace(microsecond=0).isoformat()+'Z'; Path('scheduleanalytics_build.py').write_text('BUILD_SHA = ' + repr(sha) + '\\n' + 'BUILD_TIME_UTC = ' + repr(ts) + '\\n', encoding='utf-8')"
+
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_secrets --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
 
       - name: SHA256
         shell: pwsh

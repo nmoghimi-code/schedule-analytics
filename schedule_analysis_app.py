@@ -15,6 +15,20 @@ from tkinter.scrolledtext import ScrolledText
 import xer_comparator as xc
 import narrative_engine as ne
 
+try:
+    import scheduleanalytics_build as _build  # type: ignore
+except Exception:  # pragma: no cover
+    _build = None  # type: ignore[assignment]
+
+
+def _build_label() -> str:
+    sha = (getattr(_build, "BUILD_SHA", "") if _build else "") or ""
+    ts = (getattr(_build, "BUILD_TIME_UTC", "") if _build else "") or ""
+    if sha:
+        short = sha[:8]
+        return f"{short} ({ts})" if ts else short
+    return "dev"
+
 
 def _config_path() -> Path:
     system = platform.system()
@@ -45,7 +59,7 @@ def _save_config(cfg: dict[str, Any]) -> None:
 class ScheduleAnalysisApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Schedule Analysis Tool (XER)")
+        self.title(f"Schedule Analysis Tool (XER) — {_build_label()}")
         self.minsize(900, 650)
 
         self.baseline_path = tk.StringVar(value="")
@@ -64,7 +78,22 @@ class ScheduleAnalysisApp(tk.Tk):
         self.user_token = tk.StringVar(value=str(cfg.get("user_token") or ""))
 
         self._build_ui()
+        self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self)
+
+        tools = tk.Menu(menubar, tearoff=0)
+        tools.add_command(label="Check Network", command=self._check_network)
+        tools.add_command(label="Diagnostics", command=self._show_diagnostics)
+        tools.add_separator()
+        tools.add_command(label="About", command=self._show_about)
+        tools.add_separator()
+        tools.add_command(label="Exit", command=self._on_close)
+        menubar.add_cascade(label="Tools", menu=tools)
+
+        self.config(menu=menubar)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -108,6 +137,9 @@ class ScheduleAnalysisApp(tk.Tk):
 
         self.netcheck_button = ttk.Button(run_row, text="Check Network", command=self._check_network)
         self.netcheck_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+        self.diag_button = ttk.Button(run_row, text="Diagnostics", command=self._show_diagnostics)
+        self.diag_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
 
         results_frame = ttk.LabelFrame(root, text="Results", padding=10)
         results_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
@@ -269,6 +301,102 @@ class ScheduleAnalysisApp(tk.Tk):
             self.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _show_diagnostics(self) -> None:
+        self.status_var.set("Collecting diagnostics...")
+        self.diag_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                info = ne.probe_gemini_connectivity(timeout_s=5)
+            except Exception as exc:
+                info = {"error": str(exc)}
+
+            try:
+                key_diag = ne._key_diagnostics()  # type: ignore[attr-defined]
+            except Exception as exc:
+                key_diag = {"error": str(exc)}
+
+            try:
+                recent_logs = ne.get_recent_logs(max_lines=250)
+            except Exception:
+                recent_logs = ""
+
+            payload = {
+                "build": {
+                    "label": _build_label(),
+                    "sha": (getattr(_build, "BUILD_SHA", None) if _build else None),
+                    "time_utc": (getattr(_build, "BUILD_TIME_UTC", None) if _build else None),
+                },
+                "app": {
+                    "ai_model": self.ai_model.get().strip(),
+                    "proxy_url_set": bool(self.proxy_url.get().strip()),
+                    "user_token_set": bool(self.user_token.get().strip()),
+                },
+                "network_probe": info,
+                "key_diagnostics": key_diag,
+                "recent_logs": recent_logs,
+            }
+
+            text = json.dumps(payload, indent=2, default=str)
+
+            def done() -> None:
+                self.diag_button.configure(state="normal")
+                self.status_var.set("Diagnostics ready.")
+
+                win = tk.Toplevel(self)
+                win.title("Diagnostics")
+                win.minsize(900, 600)
+                win.columnconfigure(0, weight=1)
+                win.rowconfigure(1, weight=1)
+
+                btns = ttk.Frame(win, padding=10)
+                btns.grid(row=0, column=0, sticky="ew")
+                btns.columnconfigure(0, weight=1)
+
+                def copy_to_clipboard() -> None:
+                    win.clipboard_clear()
+                    win.clipboard_append(text)
+                    win.update_idletasks()
+
+                def save_document() -> None:
+                    path = filedialog.asksaveasfilename(
+                        title="Save Diagnostics",
+                        defaultextension=".json",
+                        filetypes=[("JSON", "*.json"), ("Text", "*.txt"), ("All Files", "*.*")],
+                    )
+                    if not path:
+                        return
+                    Path(path).write_text(text, encoding="utf-8")
+
+                ttk.Button(btns, text="Copy to Clipboard", command=copy_to_clipboard).grid(
+                    row=0, column=1, sticky="e", padx=(8, 0)
+                )
+                ttk.Button(btns, text="Save", command=save_document).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+                box = ScrolledText(win, wrap="none")
+                box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+                box.insert("1.0", text)
+                box.configure(state="disabled")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_about(self) -> None:
+        import sys
+
+        info = {
+            "build": {
+                "label": _build_label(),
+                "sha": (getattr(_build, "BUILD_SHA", None) if _build else None),
+                "time_utc": (getattr(_build, "BUILD_TIME_UTC", None) if _build else None),
+            },
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "genai_transport_selected": getattr(ne, "_select_genai_transport", lambda: None)() or "default",
+        }
+        messagebox.showinfo("About", json.dumps(info, indent=2, default=str))
 
     def _on_close(self) -> None:
         try:
