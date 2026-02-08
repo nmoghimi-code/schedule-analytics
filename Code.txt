@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, Mapping
+
+import pandas as pd
+
+import xer_parser as xp
+
+
+@dataclass(frozen=True)
+class XerSnapshot:
+    label: str
+    project: pd.DataFrame
+    task: pd.DataFrame
+    taskpred: pd.DataFrame
+    wbs: pd.DataFrame
+    data_date: pd.Timestamp | None
+    data_date_col: str | None
+
+
+def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    cols_lower = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    return None
+
+
+def _extract_project_data_date(project_df: pd.DataFrame) -> tuple[pd.Timestamp | None, str | None]:
+    if project_df is None or project_df.empty:
+        return None, None
+
+    # Prefer P6 recalculation date if present; fall back to data_date.
+    preferred = ["last_recalc_date", "lastrecalcdate", "data_date", "datadate"]
+    col = _pick_col(project_df, preferred)
+    if not col:
+        recalc_like = [c for c in project_df.columns if "recalc" in c.lower() and "date" in c.lower()]
+        if recalc_like:
+            col = recalc_like[0]
+        else:
+            data_like = [c for c in project_df.columns if "data" in c.lower() and "date" in c.lower()]
+            col = data_like[0] if data_like else None
+    if not col:
+        return None, None
+
+    raw = project_df.iloc[0].get(col)
+    ts = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(ts):
+        return None, col
+    return pd.Timestamp(ts), col
+
+
+def snapshot_from_tables(label: str, tables: Mapping[str, pd.DataFrame]) -> XerSnapshot:
+    def get(name: str) -> pd.DataFrame:
+        for k, v in tables.items():
+            if k.strip().upper() == name:
+                return v
+        return pd.DataFrame()
+
+    project = get("PROJECT")
+    task = get("TASK")
+    taskpred = get("TASKPRED")
+    wbs = get("WBS")
+
+    # Apply the same enrichment as parse_xer does.
+    task = xp.merge_wbs_names(task, wbs)
+    task = xp.add_is_milestone(task)
+
+    data_date, data_date_col = _extract_project_data_date(project)
+    return XerSnapshot(
+        label=label,
+        project=project,
+        task=task,
+        taskpred=taskpred,
+        wbs=wbs,
+        data_date=data_date,
+        data_date_col=data_date_col,
+    )
+
+
+def snapshot_from_xer_path(label: str, xer_path: str | Path) -> XerSnapshot:
+    tables = xp.read_xer_tables(xer_path, ["PROJECT", "TASK", "TASKPRED", "WBS"])
+    return snapshot_from_tables(label, tables)
+
+
+def _resolve_target_row(task_df: pd.DataFrame, target_activity_id: str) -> pd.Series:
+    if task_df is None or task_df.empty:
+        raise ValueError("TASK is empty; cannot resolve target activity.")
+
+    target = str(target_activity_id).strip()
+    if not target:
+        raise ValueError("target_activity_id is empty.")
+
+    task_id_col = _pick_col(task_df, ["task_id"])
+    activity_id_col = _pick_col(task_df, ["task_code", "activity_id"])
+    name_col = _pick_col(task_df, ["task_name", "task_title", "activity_name"])
+
+    if activity_id_col:
+        match = task_df[task_df[activity_id_col].astype(str) == target]
+        if len(match) == 1:
+            return match.iloc[0]
+        if len(match) > 1:
+            raise ValueError(f"Multiple rows match {activity_id_col}='{target}'.")
+
+    if task_id_col:
+        match = task_df[task_df[task_id_col].astype(str) == target]
+        if len(match) == 1:
+            return match.iloc[0]
+
+    if name_col:
+        normalized = task_df[name_col].astype(str).str.strip()
+        match = task_df[normalized.str.casefold() == target.casefold()]
+        if len(match) == 1:
+            return match.iloc[0]
+        if len(match) > 1:
+            raise ValueError(f"Multiple rows match {name_col}='{target}'.")
+
+    raise ValueError(f"Could not resolve target_activity_id='{target}'.")
+
+
+def _detect_finish_col(task_df: pd.DataFrame) -> str | None:
+    candidates = [
+        "act_end_date",
+        "actual_finish_date",
+        "end_date",
+        "finish_date",
+        "target_end_date",
+        "early_end_date",
+        "late_end_date",
+    ]
+    col = _pick_col(task_df, candidates)
+    if col:
+        return col
+    date_like = [c for c in task_df.columns if "end" in c.lower() and "date" in c.lower()]
+    if date_like:
+        return date_like[0]
+    return None
+
+
+def _detect_actual_cols(task_df: pd.DataFrame) -> tuple[str | None, str | None]:
+    act_start = _pick_col(task_df, ["act_start_date", "actual_start_date"])
+    act_finish = _pick_col(task_df, ["act_end_date", "actual_finish_date"])
+    return act_start, act_finish
+
+
+def _float_units_to_days(float_col: str, values: pd.Series, *, hours_per_day: float = 8.0) -> pd.Series:
+    """
+    Convert float values to days when the source is clearly in hours.
+    """
+    col_lc = float_col.lower()
+    if "hr" in col_lc:
+        return values / float(hours_per_day)
+    return values
+
+
+def data_date_sync(baseline: XerSnapshot, last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]:
+    def iso(ts: pd.Timestamp | None) -> str | None:
+        return None if ts is None else ts.isoformat()
+
+    last_to_current_days: int | None = None
+    if last.data_date is not None and current.data_date is not None:
+        last_to_current_days = int((current.data_date.normalize() - last.data_date.normalize()).days)
+
+    return {
+        "baseline_data_date": iso(baseline.data_date),
+        "baseline_data_date_col": baseline.data_date_col,
+        "last_data_date": iso(last.data_date),
+        "last_data_date_col": last.data_date_col,
+        "current_data_date": iso(current.data_date),
+        "current_data_date_col": current.data_date_col,
+        "days_last_to_current": last_to_current_days,
+    }
+
+
+def milestone_finish(task_df: pd.DataFrame, target_activity_id: str) -> dict[str, Any]:
+    row = _resolve_target_row(task_df, target_activity_id)
+    finish_col = _detect_finish_col(task_df)
+    finish: pd.Timestamp | None
+    if finish_col:
+        raw = row.get(finish_col)
+        ts = pd.to_datetime(raw, errors="coerce")
+        finish = None if pd.isna(ts) else pd.Timestamp(ts)
+    else:
+        finish = None
+
+    activity_id_col = _pick_col(task_df, ["task_code", "activity_id"])
+    task_id_col = _pick_col(task_df, ["task_id"])
+    name_col = _pick_col(task_df, ["task_name", "task_title", "activity_name"])
+
+    return {
+        "task_id": (None if not task_id_col else str(row.get(task_id_col))),
+        "activity_id": (None if not activity_id_col else str(row.get(activity_id_col))),
+        "task_name": (None if not name_col else str(row.get(name_col))),
+        "finish_col": finish_col,
+        "finish_date": (None if finish is None else finish.isoformat()),
+    }
+
+
+def _variance_days(a_iso: str | None, b_iso: str | None) -> int | None:
+    if not a_iso or not b_iso:
+        return None
+    a = pd.to_datetime(a_iso, errors="coerce")
+    b = pd.to_datetime(b_iso, errors="coerce")
+    if pd.isna(a) or pd.isna(b):
+        return None
+    return int((pd.Timestamp(a).normalize() - pd.Timestamp(b).normalize()).days)
+
+
+def near_critical_ids(
+    task_df: pd.DataFrame,
+    variance_threshold: int,
+    *,
+    scope: Literal["project"] = "project",
+    hours_per_day: float = 8.0,
+) -> dict[str, Any]:
+    if task_df is None or task_df.empty:
+        return {"least_float": None, "cutoff": None, "float_col": None, "activity_ids": []}
+
+    float_col = xp.detect_total_float_column(task_df)
+    numeric = pd.to_numeric(task_df[float_col], errors="coerce")
+    lf = float(numeric.min(skipna=True))
+    cutoff = lf + float(variance_threshold)
+
+    activity_id_col = _pick_col(task_df, ["task_code", "activity_id"])
+    if not activity_id_col:
+        raise ValueError("TASK is missing an activity id column (expected 'task_code' or 'activity_id').")
+
+    df = task_df.copy()
+    df["_float_num"] = numeric
+    df = df[df["_float_num"].le(cutoff)].copy()
+
+    ids = df[activity_id_col].astype(str).tolist()
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in ids:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+
+    return {
+        "float_col": float_col,
+        "least_float": lf,
+        "cutoff": cutoff,
+        "activity_ids": out,
+        "units": ("hours" if "hr" in float_col.lower() else "days_or_unknown"),
+        "hours_per_day": float(hours_per_day),
+    }
+
+
+def near_critical_trending(
+    last: XerSnapshot,
+    current: XerSnapshot,
+    variance_threshold: int,
+    *,
+    hours_per_day: float = 8.0,
+) -> dict[str, Any]:
+    if last.data_date is None or current.data_date is None:
+        days_between = None
+    else:
+        days_between = int((current.data_date.normalize() - last.data_date.normalize()).days)
+
+    current_near = near_critical_ids(current.task, variance_threshold, hours_per_day=hours_per_day)
+    float_col = current_near["float_col"]
+    if not float_col:
+        return {
+            "days_between": days_between,
+            "least_float_current": None,
+            "cutoff_current": None,
+            "near_critical_count": 0,
+            "eroding_risks": [],
+        }
+
+    activity_id_col_curr = _pick_col(current.task, ["task_code", "activity_id"])
+    activity_id_col_last = _pick_col(last.task, ["task_code", "activity_id"])
+    if not activity_id_col_curr or not activity_id_col_last:
+        raise ValueError("TASK missing activity id columns in one of the snapshots.")
+
+    last_float_col = xp.detect_total_float_column(last.task)
+
+    curr = current.task[[activity_id_col_curr, float_col]].copy()
+    curr = curr.rename(columns={activity_id_col_curr: "activity_id", float_col: "float_current"})
+    curr["float_current"] = pd.to_numeric(curr["float_current"], errors="coerce")
+
+    prev = last.task[[activity_id_col_last, last_float_col]].copy()
+    prev = prev.rename(columns={activity_id_col_last: "activity_id", last_float_col: "float_last"})
+    prev["float_last"] = pd.to_numeric(prev["float_last"], errors="coerce")
+
+    wanted = set(current_near["activity_ids"])
+    curr = curr[curr["activity_id"].astype(str).isin(wanted)].copy()
+
+    merged = curr.merge(prev, on="activity_id", how="left")
+    merged["float_change"] = merged["float_current"] - merged["float_last"]
+
+    float_current_days = _float_units_to_days(str(float_col), merged["float_current"], hours_per_day=hours_per_day)
+    float_last_days = _float_units_to_days(str(last_float_col), merged["float_last"], hours_per_day=hours_per_day)
+    delta_days = float_current_days - float_last_days
+
+    if days_between is None:
+        eroding_mask = pd.Series([False] * len(merged), index=merged.index)
+    else:
+        eroding_mask = delta_days < (-float(days_between))
+
+    rows = []
+    for idx, r in merged.iterrows():
+        rows.append(
+            {
+                "activity_id": str(r["activity_id"]),
+                "float_current": (None if pd.isna(r["float_current"]) else float(r["float_current"])),
+                "float_last": (None if pd.isna(r["float_last"]) else float(r["float_last"])),
+                "float_change": (None if pd.isna(r["float_change"]) else float(r["float_change"])),
+                "float_change_days": (None if pd.isna(delta_days.loc[idx]) else float(delta_days.loc[idx])),
+                "eroding_risk": bool(eroding_mask.loc[idx]),
+            }
+        )
+
+    eroding = [x for x in rows if x["eroding_risk"]]
+
+    return {
+        "days_between": days_between,
+        "least_float_current": current_near["least_float"],
+        "cutoff_current": current_near["cutoff"],
+        "near_critical_count": int(len(rows)),
+        "near_critical": rows,
+        "eroding_risk_count": int(len(eroding)),
+        "eroding_risks": eroding,
+    }
+
+
+def wbs_monitor_change_and_delay(last: XerSnapshot, current: XerSnapshot, *, term: str = "change") -> dict[str, Any]:
+    # task is already enriched but we use the WBS hierarchy table to find the full section reliably
+    current_ids = set(xp.activity_ids_in_change_wbs(current.task, current.wbs, term=term))
+    last_ids = set(xp.activity_ids_in_change_wbs(last.task, last.wbs, term=term))
+    new_ids = sorted(current_ids - last_ids)
+    return {
+        "term": term,
+        "current_count": int(len(current_ids)),
+        "last_count": int(len(last_ids)),
+        "new_activity_ids": new_ids,
+    }
+
+
+def work_accomplished(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]:
+    if last.data_date is None or current.data_date is None:
+        return {"window": None, "count": 0, "activities": []}
+
+    start = last.data_date.normalize()
+    end = current.data_date.normalize()
+    if end < start:
+        start, end = end, start
+
+    act_start_col, act_finish_col = _detect_actual_cols(current.task)
+    if not act_start_col and not act_finish_col:
+        return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": 0, "activities": []}
+
+    activity_id_col = _pick_col(current.task, ["task_code", "activity_id"])
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+
+    df = current.task.copy()
+    if act_start_col:
+        df["_act_start"] = pd.to_datetime(df[act_start_col], errors="coerce")
+    else:
+        df["_act_start"] = pd.NaT
+    if act_finish_col:
+        df["_act_finish"] = pd.to_datetime(df[act_finish_col], errors="coerce")
+    else:
+        df["_act_finish"] = pd.NaT
+
+    in_start = df["_act_start"].notna() & (df["_act_start"].dt.normalize().between(start, end, inclusive="both"))
+    in_finish = df["_act_finish"].notna() & (df["_act_finish"].dt.normalize().between(start, end, inclusive="both"))
+    df = df[in_start | in_finish].copy()
+
+    activities: list[dict[str, Any]] = []
+    for _, r in df.iterrows():
+        activities.append(
+            {
+                "activity_id": (None if not activity_id_col else str(r.get(activity_id_col))),
+                "task_name": (None if not name_col else str(r.get(name_col))),
+                "wbs_name": (None if not wbs_name_col else str(r.get(wbs_name_col))),
+                "actual_start_date": (None if pd.isna(r["_act_start"]) else pd.Timestamp(r["_act_start"]).isoformat()),
+                "actual_finish_date": (None if pd.isna(r["_act_finish"]) else pd.Timestamp(r["_act_finish"]).isoformat()),
+            }
+        )
+
+    # de-dupe by activity_id if present
+    if activity_id_col:
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for a in activities:
+            aid = a.get("activity_id")
+            if aid is None:
+                deduped.append(a)
+                continue
+            if aid in seen:
+                continue
+            seen.add(aid)
+            deduped.append(a)
+        activities = deduped
+
+    return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": int(len(activities)), "activities": activities}
+
+
+def compare_three_way(
+    baseline: XerSnapshot,
+    last: XerSnapshot,
+    current: XerSnapshot,
+    *,
+    variance_threshold: int,
+    target_activity_id: str,
+    change_term: str = "change",
+    hours_per_day: float = 8.0,
+) -> dict[str, Any]:
+    period = data_date_sync(baseline, last, current)
+
+    ms_base = milestone_finish(baseline.task, target_activity_id)
+    ms_last = milestone_finish(last.task, target_activity_id)
+    ms_curr = milestone_finish(current.task, target_activity_id)
+
+    total_var = _variance_days(ms_curr["finish_date"], ms_base["finish_date"])
+    period_var = _variance_days(ms_curr["finish_date"], ms_last["finish_date"])
+
+    trending = near_critical_trending(last, current, variance_threshold, hours_per_day=hours_per_day)
+    wbs = wbs_monitor_change_and_delay(last, current, term=change_term)
+    accomplished = work_accomplished(last, current)
+
+    return {
+        "update_period": period,
+        "milestone": {
+            "target_activity_id": str(target_activity_id),
+            "baseline": ms_base,
+            "last": ms_last,
+            "current": ms_curr,
+            "total_variance_days": total_var,
+            "period_variance_days": period_var,
+        },
+        "near_critical_trending": trending,
+        "wbs_monitor": wbs,
+        "work_accomplished": accomplished,
+    }
+
+
+def _main() -> int:
+    p = argparse.ArgumentParser(description="Three-way Primavera P6 XER comparison (Baseline vs Last vs Current).")
+    p.add_argument("baseline_xer", help="Path to baseline .XER")
+    p.add_argument("last_xer", help="Path to last update .XER")
+    p.add_argument("current_xer", help="Path to current .XER")
+    p.add_argument("--target-activity-id", required=True, help="Milestone/target activity (task_code/name/task_id)")
+    p.add_argument("--variance-threshold", required=True, type=int, help="Near-critical threshold above least float")
+    p.add_argument("--change-term", default="change", help="Term used to identify the Change/Delay WBS section")
+    p.add_argument("--hours-per-day", default=8.0, type=float, help="Hours per day when float columns are in hours")
+    args = p.parse_args()
+
+    baseline = snapshot_from_xer_path("baseline", args.baseline_xer)
+    last = snapshot_from_xer_path("last", args.last_xer)
+    current = snapshot_from_xer_path("current", args.current_xer)
+
+    out = compare_three_way(
+        baseline,
+        last,
+        current,
+        variance_threshold=args.variance_threshold,
+        target_activity_id=args.target_activity_id,
+        change_term=args.change_term,
+        hours_per_day=args.hours_per_day,
+    )
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

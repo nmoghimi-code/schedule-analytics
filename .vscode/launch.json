@@ -1,0 +1,104 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run XER Parser",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/xer_parser.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "${input:xerPath}",
+        "--target-activity-id",
+        "${input:targetActivityId}",
+        "--variance-threshold",
+        "${input:varianceThreshold}",
+        "--scope",
+        "${input:scope}"
+      ]
+    },
+    {
+      "name": "Run XER Parser (No Prompts)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/xer_parser.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "sample.xer",
+        "--target-activity-id",
+        "A3000",
+        "--variance-threshold",
+        "8",
+        "--scope",
+        "network"
+      ]
+    },
+    {
+      "name": "Run XER Comparator (No Prompts)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/xer_comparator.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "sample.xer",
+        "sample.xer",
+        "sample.xer",
+        "--target-activity-id",
+        "A3000",
+        "--variance-threshold",
+        "8"
+      ]
+    },
+    {
+      "name": "Run Schedule Analysis GUI",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/schedule_analysis_app.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Run main.py",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "xerPath",
+      "type": "promptString",
+      "description": "Path to the .XER file",
+      "default": "sample.xer"
+    },
+    {
+      "id": "targetActivityId",
+      "type": "promptString",
+      "description": "Activity ID (task_code) or internal task_id",
+      "default": "A3000"
+    },
+    {
+      "id": "varianceThreshold",
+      "type": "promptString",
+      "description": "Variance threshold (e.g., 8)",
+      "default": "8"
+    },
+    {
+      "id": "scope",
+      "type": "pickString",
+      "description": "Least-float scope",
+      "options": ["network", "project"],
+      "default": "network"
+    }
+  ]
+}

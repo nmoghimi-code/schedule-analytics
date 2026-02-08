@@ -1,0 +1,20 @@
+ERMHDR	12.0	Project	...
+%T	PROJECT
+%F	proj_id	proj_short_name	data_date
+%R	1	DEMO	01-JAN-24
+%T	WBS
+%F	wbs_id	proj_id	parent_wbs_id	wbs_name
+%R	100	1		Change and Delay
+%R	102	1	100	Change - RFIs
+%R	103	1	100	Delays
+%R	101	1		Milestones
+%T	TASK
+%F	task_id	proj_id	wbs_id	task_code	task_name	task_type	total_float_hr_cnt	act_end_date	target_end_date	early_end_date
+%R	10	1	100	A1000	Start	TT_Task	16			
+%R	11	1	102	A2000	Work	TT_Task	0			
+%R	12	1	101	A3000	Substantial Completion	TT_FinMile	-8		31-JAN-24	29-JAN-24
+%T	TASKPRED
+%F	task_pred_id	task_id	pred_task_id	pred_type
+%R	100	11	10	FS
+%R	101	12	11	FS
+%E

@@ -1,0 +1,8 @@
+.DS_Store
+.DS_Store?
+OneDrive_*.zip
+Schedule Narrative Examples/
+.env
+.env.*
+__pycache__/
+*.pyc
