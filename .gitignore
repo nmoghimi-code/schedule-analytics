@@ -2,7 +2,12 @@
 .DS_Store?
 OneDrive_*.zip
 Schedule Narrative Examples/
+EXEFILES/
 .env
 .env.*
 __pycache__/
 *.pyc
+scheduleanalytics_secrets.py
+build/
+dist/
+*.spec

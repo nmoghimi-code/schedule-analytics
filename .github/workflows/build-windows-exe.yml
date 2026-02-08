@@ -24,6 +24,13 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
+      - name: Inject Gemini key (build-time)
+        shell: pwsh
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python -c "import os; from pathlib import Path; key=(os.environ.get('GEMINI_API_KEY') or '').strip(); (key and Path('scheduleanalytics_secrets.py').write_text(f'EMBEDDED_GEMINI_API_KEY = {key!r}\\n', encoding='utf-8')) or (_ for _ in ()).throw(SystemExit('Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).'))"
+
       - name: Build EXE
         run: |
           pyinstaller --noconfirm --clean --onefile --noconsole --name ScheduleAnalytics main.py
@@ -38,4 +45,3 @@ jobs:
         with:
           name: ScheduleAnalytics-windows-exe
           path: dist/ScheduleAnalytics.exe
-

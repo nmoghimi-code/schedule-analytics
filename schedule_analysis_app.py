@@ -5,14 +5,40 @@ import os
 import threading
 from pathlib import Path
 from typing import Any
+import platform
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
-from tkinter import simpledialog
 
 import xer_comparator as xc
 import narrative_engine as ne
+
+
+def _config_path() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        base = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        return base / "ScheduleAnalytics" / "config.json"
+    if system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "ScheduleAnalytics" / "config.json"
+    return Path.home() / ".schedule_analytics" / "config.json"
+
+
+def _load_config() -> dict[str, Any]:
+    p = _config_path()
+    try:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {}
+
+
+def _save_config(cfg: dict[str, Any]) -> None:
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 class ScheduleAnalysisApp(tk.Tk):
@@ -29,12 +55,15 @@ class ScheduleAnalysisApp(tk.Tk):
         self.near_critical_threshold = tk.StringVar(value="8")
         self.look_ahead_horizon = tk.StringVar(value="30")
 
-        self.ai_model = tk.StringVar(value="gemini-3-flash-preview")
-
         self._last_compare_result: dict[str, Any] | None = None
-        self._gemini_api_key: str | None = None
+
+        cfg = _load_config()
+        self.ai_model = tk.StringVar(value=str(cfg.get("ai_model") or "gemini-3-flash-preview"))
+        self.proxy_url = tk.StringVar(value=str(cfg.get("proxy_url") or ""))
+        self.user_token = tk.StringVar(value=str(cfg.get("user_token") or ""))
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -60,6 +89,8 @@ class ScheduleAnalysisApp(tk.Tk):
         self._settings_row(settings, 1, "Near-Critical Threshold (days):", self.near_critical_threshold)
         self._settings_row(settings, 2, "Look-Ahead Horizon (days):", self.look_ahead_horizon)
         self._model_row(settings, 3, "AI Logic Engine:", self.ai_model)
+        self._settings_row(settings, 4, "Narrative Proxy URL:", self.proxy_url)
+        self._secret_row(settings, 5, "User Token:", self.user_token)
 
         run_row = ttk.Frame(root)
         run_row.grid(row=2, column=0, sticky="ew")
@@ -102,6 +133,10 @@ class ScheduleAnalysisApp(tk.Tk):
     def _settings_row(self, parent: ttk.Frame, row: int, label: str, var: tk.StringVar) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+
+    def _secret_row(self, parent: ttk.Frame, row: int, label: str, var: tk.StringVar) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(parent, textvariable=var, show="•").grid(row=row, column=1, sticky="ew", pady=4)
 
     def _model_row(self, parent: ttk.Frame, row: int, label: str, var: tk.StringVar) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -209,6 +244,21 @@ class ScheduleAnalysisApp(tk.Tk):
         self.results.insert("1.0", text)
         self.results.configure(state="disabled")
 
+    def _on_close(self) -> None:
+        try:
+            cfg = _load_config()
+            cfg.update(
+                {
+                    "proxy_url": self.proxy_url.get().strip(),
+                    "user_token": self.user_token.get().strip(),
+                    "ai_model": self.ai_model.get().strip() or "gemini-3-flash-preview",
+                }
+            )
+            _save_config(cfg)
+        except Exception:
+            pass
+        self.destroy()
+
     def _generate_narrative(self) -> None:
         if not self._last_compare_result:
             messagebox.showerror("Generate Narrative", "Run the analysis first, then generate the narrative report.")
@@ -216,18 +266,29 @@ class ScheduleAnalysisApp(tk.Tk):
 
         digest = xc.get_ai_ready_digest(self._last_compare_result)
 
-        found_key = ne.find_api_key()
-        if not self._gemini_api_key and not found_key:
-            key = simpledialog.askstring(
-                "Gemini API Key",
-                "Enter your Gemini API key for this session.\n\nTip: You can also set GEMINI_API_KEY in your environment.",
-                show="*",
-                parent=self,
+        proxy_url = self.proxy_url.get().strip()
+        token = self.user_token.get().strip()
+        if bool(proxy_url) ^ bool(token):
+            messagebox.showerror(
+                "Generate Narrative",
+                "To use the Narrative Proxy you must provide BOTH:\n"
+                "  - Narrative Proxy URL\n"
+                "  - User Token\n\n"
+                "Or clear both fields to use direct Gemini (developer/test mode).",
             )
-            if not key:
-                messagebox.showerror("Generate Narrative", "No API key provided.")
-                return
-            self._gemini_api_key = key.strip()
+            return
+        try:
+            cfg = _load_config()
+            cfg.update(
+                {
+                    "proxy_url": proxy_url,
+                    "user_token": token,
+                    "ai_model": (self.ai_model.get().strip() or "gemini-3-flash-preview"),
+                }
+            )
+            _save_config(cfg)
+        except Exception:
+            pass
 
         self.status_var.set("Generating narrative...")
         self.narrative_button.configure(state="disabled")
@@ -235,9 +296,14 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
-                model = self.ai_model.get().strip() or "gemini-3-flash"
-                if self._gemini_api_key:
-                    narrative = ne.generate_narrative(digest, api_key=self._gemini_api_key, model=model)
+                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                if proxy_url and token:
+                    narrative = ne.generate_narrative_via_proxy(
+                        digest,
+                        proxy_url=proxy_url,
+                        user_token=token,
+                        model=model,
+                    )
                 else:
                     narrative = ne.generate_narrative(digest, model=model)
             except Exception as exc:

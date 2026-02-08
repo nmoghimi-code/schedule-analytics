@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import warnings
+import urllib.error
+import urllib.request
 from typing import Any, Mapping
 
 try:
@@ -15,6 +17,12 @@ try:
 except Exception as _e:  # pragma: no cover
     genai = None  # type: ignore[assignment]
     _GENAI_IMPORT_ERROR = _e
+
+
+# Optional, insecure convenience for early testing only:
+# If set, the app can generate narratives without requiring users to enter a key or set up a proxy.
+# WARNING: Any key embedded in a desktop app can be extracted by end users. Do not use this for production.
+EMBEDDED_GEMINI_API_KEY = ""
 
 
 SYSTEM_REPORT_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a proactive schedule narrative for an owner/GC report.
@@ -120,11 +128,34 @@ def find_api_key() -> str | None:
     """
     Return API key from environment or local .env (if present), else None.
     """
-    key = (os.getenv(API_KEY_ENV_VAR) or "").strip()
+    def normalize(value: str | None) -> str | None:
+        v = (value or "").strip().strip("'").strip('"').strip()
+        if not v:
+            return None
+        if v in {"YOUR_REAL_KEY_HERE", "your_key_here"}:
+            return None
+        return v
+
+    embedded = normalize(EMBEDDED_GEMINI_API_KEY)
+    if embedded:
+        return embedded
+
+    # Optional build-time injected module (recommended if you want an EXE with an embedded key
+    # without committing the key to git history).
+    try:
+        import scheduleanalytics_secrets as _secrets  # type: ignore
+
+        embedded_mod = normalize(getattr(_secrets, "EMBEDDED_GEMINI_API_KEY", None))
+        if embedded_mod:
+            return embedded_mod
+    except Exception:
+        pass
+
+    key = normalize(os.getenv(API_KEY_ENV_VAR))
     if key:
         return key
     for p in _candidate_dotenv_paths():
-        k = _read_dotenv_key(p)
+        k = normalize(_read_dotenv_key(p))
         if k:
             return k
     return None
@@ -168,4 +199,46 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
             text = resp.candidates[0].content.parts[0].text  # type: ignore[attr-defined]
         except Exception:
             text = str(resp)
+    return str(text).strip()
+
+
+def generate_narrative_via_proxy(
+    data_digest: Mapping[str, Any],
+    *,
+    proxy_url: str,
+    user_token: str,
+    model: str,
+    timeout_s: int = 120,
+) -> str:
+    """
+    Call a backend proxy that holds the Gemini API key, authenticated with a per-user token.
+    """
+    url = proxy_url.strip().rstrip("/") + "/v1/narrative"
+    token = user_token.strip()
+    if not token:
+        raise RuntimeError("Missing user token for narrative proxy.")
+
+    body = json.dumps({"data_digest": data_digest, "model": model}, default=str).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Proxy error {e.code}: {msg}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach proxy: {e}") from e
+
+    data = json.loads(raw)
+    text = data.get("text")
+    if not text:
+        raise RuntimeError(f"Proxy response missing 'text': {data}")
     return str(text).strip()
