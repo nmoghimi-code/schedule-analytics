@@ -33,7 +33,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --clean --onefile --noconsole --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_secrets --name ScheduleAnalytics main.py
 
       - name: SHA256
         shell: pwsh

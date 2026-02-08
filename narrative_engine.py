@@ -18,6 +18,11 @@ except Exception as _e:  # pragma: no cover
     genai = None  # type: ignore[assignment]
     _GENAI_IMPORT_ERROR = _e
 
+try:
+    import scheduleanalytics_secrets as _secrets  # type: ignore
+except Exception:  # pragma: no cover
+    _secrets = None  # type: ignore[assignment]
+
 
 # Optional, insecure convenience for early testing only:
 # If set, the app can generate narratives without requiring users to enter a key or set up a proxy.
@@ -143,9 +148,7 @@ def find_api_key() -> str | None:
     # Optional build-time injected module (recommended if you want an EXE with an embedded key
     # without committing the key to git history).
     try:
-        import scheduleanalytics_secrets as _secrets  # type: ignore
-
-        embedded_mod = normalize(getattr(_secrets, "EMBEDDED_GEMINI_API_KEY", None))
+        embedded_mod = normalize(getattr(_secrets, "EMBEDDED_GEMINI_API_KEY", None) if _secrets else None)
         if embedded_mod:
             return embedded_mod
     except Exception:

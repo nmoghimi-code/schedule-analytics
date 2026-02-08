@@ -40,7 +40,7 @@ jobs:
 
       - name: Build (native arch)
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 
