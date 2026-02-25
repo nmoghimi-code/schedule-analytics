@@ -327,18 +327,23 @@ def near_critical_trending(
     # Add story-friendly fields from CURRENT snapshot.
     name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
     wbs_name_col = _pick_col(current.task, ["wbs_name"])
-    if name_col or wbs_name_col:
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+    if name_col or wbs_name_col or wbs_path_col:
         cols = [activity_id_col_curr]
         if name_col:
             cols.append(name_col)
         if wbs_name_col:
             cols.append(wbs_name_col)
+        if wbs_path_col:
+            cols.append(wbs_path_col)
         details = current.task[cols].copy()
         details = details.rename(columns={activity_id_col_curr: "activity_id"})
         if name_col:
             details = details.rename(columns={name_col: "task_name"})
         if wbs_name_col:
             details = details.rename(columns={wbs_name_col: "wbs_name"})
+        if wbs_path_col:
+            details = details.rename(columns={wbs_path_col: "wbs_path"})
         details = details.drop_duplicates(subset=["activity_id"])
         merged = merged.merge(details, on="activity_id", how="left")
 
@@ -358,6 +363,7 @@ def near_critical_trending(
                 "activity_id": str(r["activity_id"]),
                 "task_name": (None if "task_name" not in merged.columns else (None if pd.isna(r.get("task_name")) else str(r.get("task_name")))),
                 "wbs_name": (None if "wbs_name" not in merged.columns else (None if pd.isna(r.get("wbs_name")) else str(r.get("wbs_name")))),
+                "wbs_path": (None if "wbs_path" not in merged.columns else (None if pd.isna(r.get("wbs_path")) else str(r.get("wbs_path")))),
                 "float_current_days": (None if pd.isna(float_current_days.loc[idx]) else float(float_current_days.loc[idx])),
                 "float_last_days": (None if pd.isna(float_last_days.loc[idx]) else float(float_last_days.loc[idx])),
                 "float_change_days": (None if pd.isna(float_change_days.loc[idx]) else float(float_change_days.loc[idx])),
@@ -765,6 +771,409 @@ def wbs_monitor_change_and_delay(last: XerSnapshot, current: XerSnapshot, *, ter
     }
 
 
+def new_activities_all_wbs(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]:
+    if current.task is None or current.task.empty:
+        return {"count": 0, "items": [], "warning": "Current TASK is empty."}
+
+    activity_id_col_curr = _pick_col(current.task, ["task_code", "activity_id"])
+    if not activity_id_col_curr:
+        return {"count": 0, "items": [], "warning": "Current TASK missing activity id column."}
+
+    activity_id_col_last = _pick_col(last.task, ["task_code", "activity_id"]) if last.task is not None else None
+    last_ids = (
+        set(last.task[activity_id_col_last].astype(str).str.strip().tolist())
+        if activity_id_col_last and last.task is not None and not last.task.empty
+        else set()
+    )
+    current_ids = set(current.task[activity_id_col_curr].astype(str).str.strip().tolist())
+    new_ids = current_ids - last_ids
+    if not new_ids:
+        return {"count": 0, "items": []}
+
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+
+    cols = [activity_id_col_curr]
+    if name_col:
+        cols.append(name_col)
+    if wbs_name_col:
+        cols.append(wbs_name_col)
+    if wbs_path_col:
+        cols.append(wbs_path_col)
+
+    df = current.task[cols].copy()
+    df = df.rename(columns={activity_id_col_curr: "activity_id"})
+    if name_col:
+        df = df.rename(columns={name_col: "task_name"})
+    if wbs_name_col:
+        df = df.rename(columns={wbs_name_col: "wbs_name"})
+    if wbs_path_col:
+        df = df.rename(columns={wbs_path_col: "wbs_path"})
+
+    df["activity_id"] = df["activity_id"].astype(str).str.strip()
+    df = df.drop_duplicates(subset=["activity_id"])
+    df = df[df["activity_id"].isin(new_ids)].copy()
+
+    def _clean(val: Any) -> str | None:
+        if val is None:
+            return None
+        try:
+            if pd.isna(val):
+                return None
+        except Exception:
+            pass
+        s = str(val).strip()
+        if not s or s.lower() in {"nan", "none"}:
+            return None
+        return s
+
+    items: list[dict[str, Any]] = []
+    for _, r in df.iterrows():
+        path = None if "wbs_path" not in df.columns else _clean(r.get("wbs_path"))
+        if not path and "wbs_name" in df.columns:
+            path = _clean(r.get("wbs_name"))
+
+        parts: list[str] = []
+        if path:
+            parts = [p.strip() for p in str(path).split(" / ") if p.strip()]
+        items.append(
+            {
+                "activity_id": str(r.get("activity_id")),
+                "task_name": (None if "task_name" not in df.columns else _clean(r.get("task_name"))),
+                "wbs_name": (None if "wbs_name" not in df.columns else _clean(r.get("wbs_name"))),
+                "wbs_path": path,
+                "wbs_hierarchy_root_to_leaf": parts,
+                "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+            }
+        )
+
+    groups_by_leaf: dict[str, dict[str, Any]] = {}
+    for it in items:
+        path = it.get("wbs_path")
+        parts = it.get("wbs_hierarchy_root_to_leaf") or []
+        leaf_name = parts[-1] if parts else it.get("wbs_name")
+        leaf_path = path if path else leaf_name
+        key = str(leaf_path or "Unknown").strip() or "Unknown"
+        if key not in groups_by_leaf:
+            groups_by_leaf[key] = {
+                "leaf_wbs_name": leaf_name,
+                "leaf_wbs_path": path,
+                "wbs_hierarchy_root_to_leaf": parts,
+                "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+                "items": [],
+            }
+        groups_by_leaf[key]["items"].append(
+            {
+                "activity_id": it.get("activity_id"),
+                "task_name": it.get("task_name"),
+            }
+        )
+
+    groups = sorted(
+        groups_by_leaf.values(),
+        key=lambda g: (g.get("leaf_wbs_path") or g.get("leaf_wbs_name") or ""),
+    )
+
+    return {
+        "count": int(len(items)),
+        "group_count": int(len(groups)),
+        "groups": groups,
+        "items": items,
+    }
+
+
+def critical_activities_all_wbs(current: XerSnapshot) -> dict[str, Any]:
+    if current.task is None or current.task.empty:
+        return {"count": 0, "items": [], "warning": "Current TASK is empty."}
+
+    activity_id_col = _pick_col(current.task, ["task_code", "activity_id"])
+    if not activity_id_col:
+        return {"count": 0, "items": [], "warning": "Current TASK missing activity id column."}
+
+    try:
+        float_col = xp.detect_total_float_column(current.task)
+    except Exception:
+        float_col = None
+    if not float_col:
+        return {"count": 0, "items": [], "warning": "Current TASK missing total float column."}
+
+    numeric = pd.to_numeric(current.task[float_col], errors="coerce")
+    numeric_days = xp.float_series_to_days(float_col, numeric)
+    if numeric_days.notna().sum() == 0:
+        return {"count": 0, "items": [], "warning": "Total float values are not available."}
+
+    least_float_current_days = float(numeric_days.min(skipna=True))
+    eps = 1e-9
+    mask = numeric_days.notna() & (numeric_days - least_float_current_days).abs().le(eps)
+
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+
+    cols = [activity_id_col, float_col]
+    if name_col:
+        cols.append(name_col)
+    if wbs_name_col:
+        cols.append(wbs_name_col)
+    if wbs_path_col:
+        cols.append(wbs_path_col)
+
+    df = current.task.loc[mask, cols].copy()
+    df = df.rename(columns={activity_id_col: "activity_id", float_col: "float_current_raw"})
+    if name_col:
+        df = df.rename(columns={name_col: "task_name"})
+    if wbs_name_col:
+        df = df.rename(columns={wbs_name_col: "wbs_name"})
+    if wbs_path_col:
+        df = df.rename(columns={wbs_path_col: "wbs_path"})
+
+    df["activity_id"] = df["activity_id"].astype(str).str.strip()
+    df = df.drop_duplicates(subset=["activity_id"])
+
+    def _clean(val: Any) -> str | None:
+        if val is None:
+            return None
+        try:
+            if pd.isna(val):
+                return None
+        except Exception:
+            pass
+        s = str(val).strip()
+        if not s or s.lower() in {"nan", "none"}:
+            return None
+        return s
+
+    items: list[dict[str, Any]] = []
+    for idx, r in df.iterrows():
+        path = None if "wbs_path" not in df.columns else _clean(r.get("wbs_path"))
+        if not path and "wbs_name" in df.columns:
+            path = _clean(r.get("wbs_name"))
+
+        parts: list[str] = []
+        if path:
+            parts = [p.strip() for p in str(path).split(" / ") if p.strip()]
+
+        float_days = numeric_days.loc[idx]
+        items.append(
+            {
+                "activity_id": str(r.get("activity_id")),
+                "task_name": (None if "task_name" not in df.columns else _clean(r.get("task_name"))),
+                "wbs_name": (None if "wbs_name" not in df.columns else _clean(r.get("wbs_name"))),
+                "wbs_path": path,
+                "wbs_hierarchy_root_to_leaf": parts,
+                "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+                "float_current_days": (None if pd.isna(float_days) else float(float_days)),
+            }
+        )
+
+    groups_by_leaf: dict[str, dict[str, Any]] = {}
+    for it in items:
+        path = it.get("wbs_path")
+        parts = it.get("wbs_hierarchy_root_to_leaf") or []
+        leaf_name = parts[-1] if parts else it.get("wbs_name")
+        leaf_path = path if path else leaf_name
+        key = str(leaf_path or "Unknown").strip() or "Unknown"
+        if key not in groups_by_leaf:
+            groups_by_leaf[key] = {
+                "leaf_wbs_name": leaf_name,
+                "leaf_wbs_path": path,
+                "wbs_hierarchy_root_to_leaf": parts,
+                "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+                "items": [],
+            }
+        groups_by_leaf[key]["items"].append(
+            {
+                "activity_id": it.get("activity_id"),
+                "task_name": it.get("task_name"),
+                "float_current_days": it.get("float_current_days"),
+            }
+        )
+
+    groups = sorted(
+        groups_by_leaf.values(),
+        key=lambda g: (g.get("leaf_wbs_path") or g.get("leaf_wbs_name") or ""),
+    )
+
+    return {
+        "least_float_current_days": least_float_current_days,
+        "count": int(len(items)),
+        "group_count": int(len(groups)),
+        "groups": groups,
+        "items": items,
+    }
+
+
+def critical_path_to_target(current: XerSnapshot, target_activity_id: str) -> dict[str, Any]:
+    if current.task is None or current.task.empty:
+        return {"paths": [], "warning": "Current TASK is empty."}
+    if current.taskpred is None or current.taskpred.empty:
+        return {"paths": [], "warning": "Current TASKPRED is empty."}
+
+    activity_id_col = _pick_col(current.task, ["task_code", "activity_id"])
+    task_id_col = _pick_col(current.task, ["task_id"])
+    if not activity_id_col or not task_id_col:
+        return {"paths": [], "warning": "Current TASK missing activity_id/task_id."}
+
+    try:
+        float_col = xp.detect_total_float_column(current.task)
+    except Exception:
+        float_col = None
+    if not float_col:
+        return {"paths": [], "warning": "Current TASK missing total float column."}
+
+    numeric = pd.to_numeric(current.task[float_col], errors="coerce")
+    numeric_days = xp.float_series_to_days(float_col, numeric)
+    if numeric_days.notna().sum() == 0:
+        return {"paths": [], "warning": "Total float values are not available."}
+
+    least_float_current_days = float(numeric_days.min(skipna=True))
+    eps = 1e-9
+
+    # Map ids and names.
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+
+    cols = [task_id_col, activity_id_col, float_col]
+    if name_col:
+        cols.append(name_col)
+    if wbs_name_col:
+        cols.append(wbs_name_col)
+    if wbs_path_col:
+        cols.append(wbs_path_col)
+
+    tmp = current.task[cols].copy()
+    tmp[task_id_col] = tmp[task_id_col].astype(str).str.strip()
+    tmp[activity_id_col] = tmp[activity_id_col].astype(str).str.strip()
+    tmp = tmp.drop_duplicates(subset=[activity_id_col])
+
+    task_id_by_activity = dict(zip(tmp[activity_id_col].tolist(), tmp[task_id_col].tolist(), strict=False))
+    activity_by_task_id = dict(zip(tmp[task_id_col].tolist(), tmp[activity_id_col].tolist(), strict=False))
+
+    name_by_activity: dict[str, str] = {}
+    if name_col:
+        for aid, nm in zip(tmp[activity_id_col].tolist(), tmp[name_col].astype(str).tolist(), strict=False):
+            name_by_activity[str(aid)] = str(nm)
+
+    wbs_name_by_activity: dict[str, str] = {}
+    if wbs_name_col:
+        for aid, wnm in zip(tmp[activity_id_col].tolist(), tmp[wbs_name_col].astype(str).tolist(), strict=False):
+            wbs_name_by_activity[str(aid)] = str(wnm)
+
+    wbs_path_by_activity: dict[str, str] = {}
+    if wbs_path_col:
+        for aid, wpath in zip(tmp[activity_id_col].tolist(), tmp[wbs_path_col].astype(str).tolist(), strict=False):
+            wbs_path_by_activity[str(aid)] = str(wpath)
+
+    float_days_by_activity: dict[str, float] = {}
+    vals_raw = pd.to_numeric(tmp[float_col], errors="coerce")
+    vals_days = xp.float_series_to_days(float_col, vals_raw)
+    for aid, v in zip(tmp[activity_id_col].tolist(), vals_days.tolist(), strict=False):
+        if pd.isna(v):
+            continue
+        float_days_by_activity[str(aid)] = float(v)
+
+    critical_ids = {aid for aid, v in float_days_by_activity.items() if abs(v - least_float_current_days) <= eps}
+
+    # Resolve target activity.
+    try:
+        target_row = _resolve_target_row(current.task, target_activity_id)
+    except Exception as e:
+        return {"paths": [], "warning": f"Could not resolve target_activity_id: {e}"}
+
+    target_aid = None if not activity_id_col else str(target_row.get(activity_id_col))
+    target_tid = None if not task_id_col else str(target_row.get(task_id_col))
+    if not target_aid and target_tid:
+        target_aid = activity_by_task_id.get(target_tid)
+
+    if not target_aid:
+        return {"paths": [], "warning": "Could not resolve target activity id."}
+
+    # Build predecessor mapping: succ_aid -> list[pred_aid] (critical only).
+    succ_col = _pick_col(current.taskpred, ["task_id"])
+    pred_col = _pick_col(current.taskpred, ["pred_task_id"])
+    if not succ_col or not pred_col:
+        return {"paths": [], "warning": "Current TASKPRED missing task_id/pred_task_id."}
+
+    pred_by_succ: dict[str, set[str]] = defaultdict(set)
+    dfp = current.taskpred[[succ_col, pred_col]].copy()
+    dfp[succ_col] = dfp[succ_col].astype(str).str.strip()
+    dfp[pred_col] = dfp[pred_col].astype(str).str.strip()
+    for _, r in dfp.iterrows():
+        succ_tid = str(r[succ_col]).strip()
+        pred_tid = str(r[pred_col]).strip()
+        if not succ_tid or not pred_tid or succ_tid.lower() == "nan" or pred_tid.lower() == "nan":
+            continue
+        succ_aid = activity_by_task_id.get(succ_tid)
+        pred_aid = activity_by_task_id.get(pred_tid)
+        if not succ_aid or not pred_aid:
+            continue
+        if pred_aid in critical_ids:
+            pred_by_succ[str(succ_aid)].add(str(pred_aid))
+
+    max_depth = 50
+    max_paths = 5
+    paths: list[list[str]] = []
+
+    def dfs(cur_aid: str, path: list[str], visited: set[str]) -> None:
+        if len(path) > max_depth:
+            paths.append(path)
+            return
+        preds = sorted(pred_by_succ.get(cur_aid, set()))
+        if not preds:
+            paths.append(path)
+            return
+        for p in preds:
+            if p in visited:
+                continue
+            dfs(p, [p] + path, visited | {p})
+
+    dfs(str(target_aid), [str(target_aid)], {str(target_aid)})
+
+    # Prefer longer chains (more critical activities).
+    paths = sorted(paths, key=len, reverse=True)[:max_paths]
+
+    def item_for(aid: str) -> dict[str, Any]:
+        return {
+            "activity_id": aid,
+            "task_name": name_by_activity.get(aid),
+            "wbs_path": wbs_path_by_activity.get(aid),
+            "wbs_name": wbs_name_by_activity.get(aid),
+            "is_critical": aid in critical_ids,
+            "float_current_days": float_days_by_activity.get(aid),
+        }
+
+    out_paths = []
+    links = []
+    for p in paths:
+        chain = [item_for(aid) for aid in p]
+        out_paths.append({"length": len(p), "activity_chain": chain})
+        for i in range(len(p) - 1):
+            links.append({"from_activity_id": p[i], "to_activity_id": p[i + 1]})
+
+    # De-duplicate links
+    seen_links: set[tuple[str, str]] = set()
+    dedup_links = []
+    for l in links:
+        key = (str(l.get("from_activity_id")), str(l.get("to_activity_id")))
+        if key in seen_links:
+            continue
+        seen_links.add(key)
+        dedup_links.append(l)
+
+    return {
+        "target_activity_id": target_aid,
+        "target_task_name": name_by_activity.get(str(target_aid)),
+        "target_wbs_path": wbs_path_by_activity.get(str(target_aid)),
+        "least_float_current_days": least_float_current_days,
+        "critical_count": int(len(critical_ids)),
+        "path_count": int(len(out_paths)),
+        "paths": out_paths,
+        "links": dedup_links,
+    }
+
+
 def critical_path_successor_summaries(
     last: XerSnapshot,
     current: XerSnapshot,
@@ -1113,7 +1522,10 @@ def compare_three_way(
 
     trending = near_critical_trending(last, current, variance_threshold)
     wbs = wbs_monitor_change_and_delay(last, current, term=change_term)
+    critical_global = critical_activities_all_wbs(current)
+    new_global = new_activities_all_wbs(last, current)
     accomplished = work_accomplished(last, current)
+    critical_path = critical_path_to_target(current, target_activity_id)
 
     return {
         "settings": {
@@ -1132,7 +1544,10 @@ def compare_three_way(
         },
         "near_critical_trending": trending,
         "wbs_monitor": wbs,
+        "critical_activities_global": critical_global,
+        "new_activities_global": new_global,
         "work_accomplished": accomplished,
+        "critical_path_to_target": critical_path,
     }
 
 
@@ -1146,7 +1561,10 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     milestone = compare_result.get("milestone", {}) or {}
     trending = compare_result.get("near_critical_trending", {}) or {}
     wbs = compare_result.get("wbs_monitor", {}) or {}
+    critical_global = compare_result.get("critical_activities_global", {}) or {}
+    new_global = compare_result.get("new_activities_global", {}) or {}
     accomplished = compare_result.get("work_accomplished", {}) or {}
+    critical_path = compare_result.get("critical_path_to_target", {}) or {}
     settings = compare_result.get("settings", {}) or {}
 
     def ms_part(label: str) -> dict[str, Any]:
@@ -1164,11 +1582,13 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                 "activity_id": r.get("activity_id"),
                 "task_name": r.get("task_name"),
                 "wbs_name": r.get("wbs_name"),
+                "wbs_path": r.get("wbs_path"),
                 "float_last_days": r.get("float_last_days"),
                 "float_current_days": r.get("float_current_days"),
                 "float_change_days": r.get("float_change_days"),
                 "float_loss_days": r.get("float_loss_days"),
                 "days_passed": r.get("days_passed"),
+                "eroding_risk": r.get("eroding_risk"),
             }
         )
 
@@ -1206,6 +1626,110 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
 
+    def _group_near_critical(src: Mapping[str, Any]) -> dict[str, Any]:
+        items = src.get("near_critical", []) or []
+        if not items:
+            return {"count": 0, "group_count": 0, "groups": []}
+
+        def _clean(val: Any) -> str | None:
+            if val is None:
+                return None
+            try:
+                if pd.isna(val):
+                    return None
+            except Exception:
+                pass
+            s = str(val).strip()
+            if not s or s.lower() in {"nan", "none"}:
+                return None
+            return s
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for r in items:
+            path = _clean(r.get("wbs_path")) or _clean(r.get("wbs_name"))
+            parts = [p.strip() for p in str(path).split(" / ") if p.strip()] if path else []
+            leaf_name = parts[-1] if parts else _clean(r.get("wbs_name"))
+            key = str(path or leaf_name or "Unknown").strip() or "Unknown"
+
+            if key not in grouped:
+                grouped[key] = {
+                    "leaf_wbs_name": leaf_name,
+                    "leaf_wbs_path": path,
+                    "wbs_hierarchy_root_to_leaf": parts,
+                    "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+                    "items": [],
+                }
+
+            grouped[key]["items"].append(
+                {
+                    "activity_id": r.get("activity_id"),
+                    "task_name": r.get("task_name"),
+                    "float_last_days": r.get("float_last_days"),
+                    "float_current_days": r.get("float_current_days"),
+                    "float_change_days": r.get("float_change_days"),
+                    "float_loss_days": r.get("float_loss_days"),
+                    "days_passed": r.get("days_passed"),
+                    "eroding_risk": r.get("eroding_risk"),
+                }
+            )
+
+        groups = sorted(
+            grouped.values(),
+            key=lambda g: (g.get("leaf_wbs_path") or g.get("leaf_wbs_name") or ""),
+        )
+        return {"count": int(len(items)), "group_count": int(len(groups)), "groups": groups}
+
+    new_global_items = []
+    for r in (new_global.get("items", []) or []):
+        new_global_items.append(
+            {
+                "activity_id": r.get("activity_id"),
+                "task_name": r.get("task_name"),
+                "wbs_name": r.get("wbs_name"),
+                "wbs_path": r.get("wbs_path"),
+                "wbs_hierarchy_leaf_to_root": r.get("wbs_hierarchy_leaf_to_root"),
+                "wbs_hierarchy_root_to_leaf": r.get("wbs_hierarchy_root_to_leaf"),
+            }
+        )
+
+    new_global_groups = []
+    for g in (new_global.get("groups", []) or []):
+        new_global_groups.append(
+            {
+                "leaf_wbs_name": g.get("leaf_wbs_name"),
+                "leaf_wbs_path": g.get("leaf_wbs_path"),
+                "wbs_hierarchy_leaf_to_root": g.get("wbs_hierarchy_leaf_to_root"),
+                "wbs_hierarchy_root_to_leaf": g.get("wbs_hierarchy_root_to_leaf"),
+                "items": g.get("items"),
+            }
+        )
+
+    critical_items = []
+    for r in (critical_global.get("items", []) or []):
+        critical_items.append(
+            {
+                "activity_id": r.get("activity_id"),
+                "task_name": r.get("task_name"),
+                "wbs_name": r.get("wbs_name"),
+                "wbs_path": r.get("wbs_path"),
+                "wbs_hierarchy_leaf_to_root": r.get("wbs_hierarchy_leaf_to_root"),
+                "wbs_hierarchy_root_to_leaf": r.get("wbs_hierarchy_root_to_leaf"),
+                "float_current_days": r.get("float_current_days"),
+            }
+        )
+
+    critical_groups = []
+    for g in (critical_global.get("groups", []) or []):
+        critical_groups.append(
+            {
+                "leaf_wbs_name": g.get("leaf_wbs_name"),
+                "leaf_wbs_path": g.get("leaf_wbs_path"),
+                "wbs_hierarchy_leaf_to_root": g.get("wbs_hierarchy_leaf_to_root"),
+                "wbs_hierarchy_root_to_leaf": g.get("wbs_hierarchy_root_to_leaf"),
+                "items": g.get("items"),
+            }
+        )
+
     return {
         "settings": {
             "variance_threshold": settings.get("variance_threshold"),
@@ -1233,6 +1757,7 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "count": trending.get("eroding_risk_count"),
             "items": eroding,
         },
+        "near_critical_grouped": _group_near_critical(trending),
         "change_delay_wbs_new_activities": {
             "count": (len(new_change)),
             "items": new_change,
@@ -1241,7 +1766,23 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "critical_path_successor_summaries": cps_items,
             "cross_wbs_alerts": cross_wbs_alerts,
         },
+        "critical_activities_global": {
+            "least_float_current_days": critical_global.get("least_float_current_days"),
+            "count": critical_global.get("count"),
+            "group_count": critical_global.get("group_count"),
+            "warning": critical_global.get("warning"),
+            "groups": critical_groups,
+            "items": critical_items,
+        },
+        "new_activities_global": {
+            "count": new_global.get("count"),
+            "group_count": new_global.get("group_count"),
+            "warning": new_global.get("warning"),
+            "groups": new_global_groups,
+            "items": new_global_items,
+        },
         "work_accomplished": accomplished,
+        "critical_path_to_target": critical_path,
     }
 
 
