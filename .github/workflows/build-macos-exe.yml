@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,10 +27,8 @@ jobs:
           python -m pip install pyinstaller
 
       - name: Inject Gemini key (build-time, optional)
-        if: ${{ secrets.GEMINI_API_KEY != '' }}
+        if: ${{ env.GEMINI_API_KEY != '' }}
         shell: bash
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python - <<'PY'
           import os
@@ -53,14 +53,14 @@ jobs:
           PY
 
       - name: Build (native arch, embedded key)
-        if: ${{ secrets.GEMINI_API_KEY != '' }}
+        if: ${{ env.GEMINI_API_KEY != '' }}
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 
       - name: Build (native arch, no embedded key)
-        if: ${{ secrets.GEMINI_API_KEY == '' }}
+        if: ${{ env.GEMINI_API_KEY == '' }}
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
