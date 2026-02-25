@@ -24,7 +24,8 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
-      - name: Inject Gemini key (build-time)
+      - name: Inject Gemini key (build-time, optional)
+        if: ${{ secrets.GEMINI_API_KEY != '' }}
         shell: bash
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -34,7 +35,7 @@ jobs:
           from pathlib import Path
           key = (os.environ.get("GEMINI_API_KEY") or "").strip()
           if not key:
-            raise SystemExit("Missing GitHub Actions secret GEMINI_API_KEY (Settings → Secrets and variables → Actions).")
+            raise SystemExit("Missing/empty GEMINI_API_KEY secret.")
           Path("scheduleanalytics_secrets.py").write_text(f'EMBEDDED_GEMINI_API_KEY = {key!r}\n', encoding="utf-8")
           PY
           python -c "import scheduleanalytics_secrets as s, sys; k=getattr(s,'EMBEDDED_GEMINI_API_KEY',''); print('Injected key length:', len(k)); sys.exit(0 if k else 1)"
@@ -51,9 +52,17 @@ jobs:
           Path("scheduleanalytics_build.py").write_text(f"BUILD_SHA = {sha!r}\nBUILD_TIME_UTC = {ts!r}\n", encoding="utf-8")
           PY
 
-      - name: Build (native arch)
+      - name: Build (native arch, embedded key)
+        if: ${{ secrets.GEMINI_API_KEY != '' }}
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
+          chmod +x dist/ScheduleAnalytics
+          file dist/ScheduleAnalytics
+
+      - name: Build (native arch, no embedded key)
+        if: ${{ secrets.GEMINI_API_KEY == '' }}
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 

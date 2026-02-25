@@ -35,7 +35,8 @@ With this setup, users do **not** need to enter a Gemini API key in the app.
 
 - Ensure the project is pushed to GitHub.
 - The workflow file is `.github/workflows/build-windows-exe.yml`.
-- To embed Gemini in the EXE for quick testing, add a GitHub Actions secret named `GEMINI_API_KEY` (repo **Settings → Secrets and variables → Actions**) and run the workflow. The build injects a `scheduleanalytics_secrets.py` at build time (the key is not committed), but note the EXE can still be reverse-engineered.
+- By default, the EXE is built **without** an embedded Gemini key. Users must either set `GEMINI_API_KEY` (via a `.env` file placed next to the EXE, or an environment variable) or use the Narrative Proxy mode.
+- Optional (not recommended for production): To embed Gemini in the EXE for quick testing, add a GitHub Actions secret named `GEMINI_API_KEY` (repo **Settings → Secrets and variables → Actions**) and run the workflow. The build injects a `scheduleanalytics_secrets.py` at build time (the key is not committed), but note the EXE can still be reverse-engineered.
 - Trigger it from GitHub: **Actions → Build Windows EXE (PyInstaller) → Run workflow**.
 - Download the artifact `ScheduleAnalytics-windows-exe` and run `ScheduleAnalytics.exe`.
 
