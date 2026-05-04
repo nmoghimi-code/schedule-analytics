@@ -1313,7 +1313,7 @@ def critical_path_successor_summaries(
         return "Unknown"
 
     def label(aid: str) -> str:
-        nm = name_by_activity.get(aid) or aid
+        nm = name_by_activity.get(aid) or "Unnamed activity"
         st = status(aid)
         crit = is_critical(aid)
         if crit:
@@ -1342,7 +1342,7 @@ def critical_path_successor_summaries(
             items.append(
                 {
                     "root_activity_id": root_aid,
-                    "summary": f"{root_aid} (New) -> Impacts -> (No successors: missing task_id).",
+                    "summary": "Unnamed new activity -> Impacts -> (No successors: missing task_id).",
                     "path_activity_ids": [root_aid],
                 }
             )
@@ -1501,6 +1501,757 @@ def work_accomplished(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]
     return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": int(len(activities)), "activities": activities}
 
 
+def _clean_optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none", "nat"}:
+        return None
+    return s
+
+
+def _parse_date(value: Any) -> pd.Timestamp | None:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def _select_forecast_start_date(task_df: pd.DataFrame, row: pd.Series) -> tuple[pd.Timestamp | None, str | None]:
+    """
+    Select a planned/forecast start date for look-ahead checks.
+    """
+    priority_groups: list[list[str]] = [
+        ["early_start_date", "early_start"],
+        ["target_start_date", "target_start"],
+        ["start_date"],
+        ["late_start_date", "late_start"],
+        ["act_start_date", "actual_start_date"],
+    ]
+
+    for group in priority_groups:
+        col = _pick_col(task_df, group)
+        if not col:
+            continue
+        ts = _parse_date(row.get(col))
+        if ts is not None:
+            return ts, col
+    return None, None
+
+
+def _select_forecast_finish_date(task_df: pd.DataFrame, row: pd.Series) -> tuple[pd.Timestamp | None, str | None]:
+    """
+    Select a non-actual finish date for look-back slippage checks.
+
+    P6 exports vary by configuration. Early finish is usually the best forecast for in-progress work,
+    while target finish is a useful fallback for not-started work.
+    """
+    priority_groups: list[list[str]] = [
+        ["early_end_date", "early_finish_date"],
+        ["target_finish_date", "target_end_date"],
+        ["end_date", "finish_date"],
+        ["late_end_date", "late_finish_date"],
+    ]
+
+    for group in priority_groups:
+        col = _pick_col(task_df, group)
+        if not col:
+            continue
+        ts = _parse_date(row.get(col))
+        if ts is not None:
+            return ts, col
+    return None, None
+
+
+def _group_items_by_wbs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups_by_leaf: dict[str, dict[str, Any]] = {}
+    for it in items:
+        path = _clean_optional(it.get("wbs_path")) or _clean_optional(it.get("wbs_name"))
+        parts = [p.strip() for p in str(path).split(" / ") if p.strip()] if path else []
+        leaf_name = parts[-1] if parts else _clean_optional(it.get("wbs_name"))
+        key = str(path or leaf_name or "Unknown").strip() or "Unknown"
+        if key not in groups_by_leaf:
+            groups_by_leaf[key] = {
+                "leaf_wbs_name": leaf_name,
+                "leaf_wbs_path": path,
+                "wbs_hierarchy_root_to_leaf": parts,
+                "wbs_hierarchy_leaf_to_root": list(reversed(parts)),
+                "items": [],
+            }
+        groups_by_leaf[key]["items"].append(it)
+
+    return sorted(groups_by_leaf.values(), key=lambda g: (g.get("leaf_wbs_path") or g.get("leaf_wbs_name") or ""))
+
+
+def _task_lookup_by_activity(snapshot: XerSnapshot) -> dict[str, pd.Series]:
+    if snapshot.task is None or snapshot.task.empty:
+        return {}
+    activity_id_col = _pick_col(snapshot.task, ["task_code", "activity_id"])
+    if not activity_id_col:
+        return {}
+    out: dict[str, pd.Series] = {}
+    for _, row in snapshot.task.iterrows():
+        aid = str(row.get(activity_id_col, "")).strip()
+        if aid and aid.lower() != "nan" and aid not in out:
+            out[aid] = row
+    return out
+
+
+def _activity_task_id_maps(snapshot: XerSnapshot) -> tuple[dict[str, str], dict[str, str]]:
+    if snapshot.task is None or snapshot.task.empty:
+        return {}, {}
+    activity_id_col = _pick_col(snapshot.task, ["task_code", "activity_id"])
+    task_id_col = _pick_col(snapshot.task, ["task_id"])
+    if not activity_id_col or not task_id_col:
+        return {}, {}
+    activity_by_task_id: dict[str, str] = {}
+    task_id_by_activity: dict[str, str] = {}
+    for _, row in snapshot.task.iterrows():
+        aid = str(row.get(activity_id_col, "")).strip()
+        tid = str(row.get(task_id_col, "")).strip()
+        if not aid or aid.lower() == "nan" or not tid or tid.lower() == "nan":
+            continue
+        task_id_by_activity[aid] = tid
+        activity_by_task_id[tid] = aid
+    return task_id_by_activity, activity_by_task_id
+
+
+def _selected_task_fields(snapshot: XerSnapshot, activity_id: str) -> dict[str, Any]:
+    row = _task_lookup_by_activity(snapshot).get(str(activity_id))
+    if row is None:
+        return {}
+
+    def col(names: list[str]) -> str | None:
+        return _pick_col(snapshot.task, names)
+
+    field_groups = {
+        "forecast_start": ["early_start_date", "early_start", "target_start_date", "target_start", "start_date"],
+        "forecast_finish": ["early_end_date", "early_finish_date", "target_finish_date", "target_end_date", "end_date", "finish_date"],
+        "constraint_type": ["cstr_type", "constraint_type", "primary_constraint_type"],
+        "constraint_date": ["cstr_date", "constraint_date", "primary_constraint_date"],
+        "secondary_constraint_type": ["cstr_type2", "secondary_constraint_type"],
+        "secondary_constraint_date": ["cstr_date2", "secondary_constraint_date"],
+        "calendar": ["clndr_id", "calendar_id", "calendar_name"],
+        "remaining_duration": ["remain_drtn_hr_cnt", "remaining_duration", "remain_drtn"],
+        "original_duration": ["target_drtn_hr_cnt", "orig_drtn_hr_cnt", "duration"],
+        "physical_percent_complete": ["phys_complete_pct", "physical_percent_complete"],
+        "status": ["status_code", "task_status"],
+    }
+
+    out: dict[str, Any] = {}
+    for key, names in field_groups.items():
+        c = col(names)
+        if not c:
+            continue
+        value = row.get(c)
+        cleaned = _clean_optional(value)
+        if cleaned is not None:
+            out[key] = cleaned
+            out[f"{key}_col"] = c
+    return out
+
+
+def _task_field_changes(last: XerSnapshot, current: XerSnapshot, activity_id: str) -> list[dict[str, Any]]:
+    before = _selected_task_fields(last, activity_id)
+    after = _selected_task_fields(current, activity_id)
+    keys = sorted({k for k in before.keys() | after.keys() if not k.endswith("_col")})
+    changes: list[dict[str, Any]] = []
+    for key in keys:
+        before_val = before.get(key)
+        after_val = after.get(key)
+        if before_val == after_val:
+            continue
+        change: dict[str, Any] = {
+            "field": key,
+            "previous_value": before_val,
+            "current_value": after_val,
+        }
+
+        before_date = _parse_date(before_val)
+        after_date = _parse_date(after_val)
+        if before_date is not None and after_date is not None:
+            change["delta_days"] = int((after_date.normalize() - before_date.normalize()).days)
+
+        changes.append(change)
+    return changes
+
+
+def _relationship_records_by_pair(snapshot: XerSnapshot) -> dict[tuple[str, str], dict[str, Any]]:
+    if snapshot.taskpred is None or snapshot.taskpred.empty:
+        return {}
+    _, activity_by_task_id = _activity_task_id_maps(snapshot)
+    succ_col = _pick_col(snapshot.taskpred, ["task_id"])
+    pred_col = _pick_col(snapshot.taskpred, ["pred_task_id"])
+    if not succ_col or not pred_col:
+        return {}
+
+    type_col = _pick_col(snapshot.taskpred, ["pred_type", "link_type", "relationship_type"])
+    lag_col = _pick_col(snapshot.taskpred, ["lag_hr_cnt", "lag_drtn_hr_cnt", "lag", "lag_days"])
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for _, row in snapshot.taskpred.iterrows():
+        succ_tid = str(row.get(succ_col, "")).strip()
+        pred_tid = str(row.get(pred_col, "")).strip()
+        pred_aid = activity_by_task_id.get(pred_tid)
+        succ_aid = activity_by_task_id.get(succ_tid)
+        if not pred_aid or not succ_aid:
+            continue
+        rec: dict[str, Any] = {
+            "predecessor_activity_id": pred_aid,
+            "successor_activity_id": succ_aid,
+        }
+        if type_col:
+            rec["relationship_type"] = _clean_optional(row.get(type_col))
+        if lag_col:
+            raw_lag = pd.to_numeric(row.get(lag_col), errors="coerce")
+            lag_days = None if pd.isna(raw_lag) else float(xp.float_series_to_days(lag_col, pd.Series([raw_lag])).iloc[0])
+            rec["lag_days"] = lag_days
+        out[(pred_aid, succ_aid)] = rec
+    return out
+
+
+def _relationship_change_evidence(
+    last: XerSnapshot,
+    current: XerSnapshot,
+    *,
+    current_path_ids: list[str],
+    previous_path_ids: list[str],
+) -> list[dict[str, Any]]:
+    last_rels = _relationship_records_by_pair(last)
+    curr_rels = _relationship_records_by_pair(current)
+    current_pairs = list(zip(current_path_ids, current_path_ids[1:], strict=False))
+    previous_pairs = list(zip(previous_path_ids, previous_path_ids[1:], strict=False))
+
+    current_lookup = _task_lookup_by_activity(current)
+    last_lookup = _task_lookup_by_activity(last)
+
+    def name(snapshot_rows: dict[str, pd.Series], aid: str) -> str | None:
+        row = snapshot_rows.get(aid)
+        if row is None:
+            return None
+        name_col = _pick_col(current.task if snapshot_rows is current_lookup else last.task, ["task_name", "task_title", "activity_name"])
+        return _clean_optional(row.get(name_col)) if name_col else None
+
+    out: list[dict[str, Any]] = []
+    for pair in current_pairs:
+        cur = curr_rels.get(pair)
+        prev = last_rels.get(pair)
+        if cur and not prev:
+            out.append(
+                {
+                    "driver_type": "relationship_added_on_current_path",
+                    "predecessor_task_name": name(current_lookup, pair[0]),
+                    "successor_task_name": name(current_lookup, pair[1]),
+                    "relationship_type": cur.get("relationship_type"),
+                    "lag_days": cur.get("lag_days"),
+                    "detail": "A predecessor relationship on the current primary critical path was not present in the previous update.",
+                }
+            )
+        elif cur and prev:
+            changed_fields: dict[str, Any] = {}
+            for field in ["relationship_type", "lag_days"]:
+                if cur.get(field) != prev.get(field):
+                    changed_fields[field] = {"previous": prev.get(field), "current": cur.get(field)}
+            if changed_fields:
+                out.append(
+                    {
+                        "driver_type": "relationship_changed_on_current_path",
+                        "predecessor_task_name": name(current_lookup, pair[0]),
+                        "successor_task_name": name(current_lookup, pair[1]),
+                        "changed_fields": changed_fields,
+                        "detail": "A relationship type or lag value changed on the current primary critical path.",
+                    }
+                )
+
+    current_pair_set = set(current_pairs)
+    for pair in previous_pairs:
+        if pair in current_pair_set:
+            continue
+        prev = last_rels.get(pair)
+        if prev and pair not in curr_rels:
+            out.append(
+                {
+                    "driver_type": "relationship_removed_from_previous_path",
+                    "predecessor_task_name": name(last_lookup, pair[0]),
+                    "successor_task_name": name(last_lookup, pair[1]),
+                    "relationship_type": prev.get("relationship_type"),
+                    "lag_days": prev.get("lag_days"),
+                    "detail": "A relationship that was part of the previous primary critical path is no longer present.",
+                }
+            )
+    return out
+
+
+def look_ahead_window_analysis(
+    current: XerSnapshot,
+    *,
+    horizon_days: int | None,
+    near_critical_activity_ids: set[str] | None = None,
+    critical_activity_ids: set[str] | None = None,
+    critical_path_activity_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Find current-schedule activities with forecast start/finish dates inside the user-defined look-ahead window.
+    """
+    if current.data_date is None:
+        return {"window": None, "count": 0, "groups": [], "items": [], "warning": "Current data date is not available."}
+    if current.task is None or current.task.empty:
+        return {"window": None, "count": 0, "groups": [], "items": [], "warning": "Current TASK is empty."}
+
+    try:
+        horizon = max(0, int(horizon_days if horizon_days is not None else 0))
+    except Exception:
+        horizon = 0
+
+    start = current.data_date.normalize()
+    end = start + pd.Timedelta(days=horizon)
+
+    activity_id_col = _pick_col(current.task, ["task_code", "activity_id"])
+    if not activity_id_col:
+        return {"window": {"start": start.isoformat(), "end": end.isoformat(), "horizon_days": horizon}, "count": 0, "groups": [], "items": [], "warning": "Current TASK missing activity id column."}
+
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+    act_start_col, act_finish_col = _detect_actual_cols(current.task)
+
+    float_col = None
+    float_days: pd.Series | None = None
+    try:
+        float_col = xp.detect_total_float_column(current.task)
+        float_days = xp.float_series_to_days(float_col, pd.to_numeric(current.task[float_col], errors="coerce"))
+    except Exception:
+        float_col = None
+        float_days = None
+
+    near_critical_activity_ids = near_critical_activity_ids or set()
+    critical_activity_ids = critical_activity_ids or set()
+    critical_path_activity_ids = critical_path_activity_ids or set()
+
+    items: list[dict[str, Any]] = []
+    for idx, row in current.task.iterrows():
+        aid = str(row.get(activity_id_col, "")).strip()
+        if not aid or aid.lower() == "nan":
+            continue
+
+        actual_finish = _parse_date(row.get(act_finish_col)) if act_finish_col else None
+        if actual_finish is not None and actual_finish.normalize() < start:
+            continue
+
+        forecast_start, forecast_start_col = _select_forecast_start_date(current.task, row)
+        forecast_finish, forecast_finish_col = _select_forecast_finish_date(current.task, row)
+
+        dates_in_window: list[str] = []
+        if forecast_start is not None and start <= forecast_start.normalize() <= end:
+            dates_in_window.append("start")
+        if forecast_finish is not None and start <= forecast_finish.normalize() <= end:
+            dates_in_window.append("finish")
+        if not dates_in_window:
+            continue
+
+        status = "not_started"
+        actual_start = _parse_date(row.get(act_start_col)) if act_start_col else None
+        if actual_finish is not None:
+            status = "finished"
+        elif actual_start is not None:
+            status = "in_progress"
+
+        tf = None
+        if float_days is not None:
+            val = float_days.loc[idx]
+            tf = None if pd.isna(val) else float(val)
+
+        items.append(
+            {
+                "activity_id": aid,
+                "task_name": _clean_optional(row.get(name_col)) if name_col else None,
+                "wbs_name": _clean_optional(row.get(wbs_name_col)) if wbs_name_col else None,
+                "wbs_path": _clean_optional(row.get(wbs_path_col)) if wbs_path_col else None,
+                "forecast_start_date": None if forecast_start is None else forecast_start.isoformat(),
+                "forecast_start_col": forecast_start_col,
+                "forecast_finish_date": None if forecast_finish is None else forecast_finish.isoformat(),
+                "forecast_finish_col": forecast_finish_col,
+                "dates_in_window": dates_in_window,
+                "current_status": status,
+                "total_float_days": tf,
+                "near_critical_current": aid in near_critical_activity_ids,
+                "critical_current": aid in critical_activity_ids,
+                "on_current_critical_path": aid in critical_path_activity_ids,
+            }
+        )
+
+    items.sort(
+        key=lambda x: (
+            not bool(x.get("on_current_critical_path")),
+            not bool(x.get("critical_current")),
+            not bool(x.get("near_critical_current")),
+            x.get("forecast_start_date") or x.get("forecast_finish_date") or "",
+            x.get("wbs_path") or "",
+        )
+    )
+    groups = _group_items_by_wbs(items)
+    risk_items = [x for x in items if x.get("critical_current") or x.get("near_critical_current") or x.get("on_current_critical_path")]
+    risk_groups = _group_items_by_wbs(risk_items)
+
+    return {
+        "window": {"start": start.isoformat(), "end": end.isoformat(), "horizon_days": horizon},
+        "count": int(len(items)),
+        "group_count": int(len(groups)),
+        "critical_or_near_critical_count": int(len(risk_items)),
+        "critical_or_near_critical_group_count": int(len(risk_groups)),
+        "groups": groups,
+        "critical_or_near_critical_groups": risk_groups,
+        "items": items,
+    }
+
+
+def finish_extensions_in_progress(
+    last: XerSnapshot,
+    current: XerSnapshot,
+    *,
+    target_activity_id: str,
+    near_critical_activity_ids: set[str] | None = None,
+    critical_activity_ids: set[str] | None = None,
+    critical_path_activity_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Find activities that were expected to finish during the last-current update window,
+    remain in progress in the current update, and now forecast a later finish.
+    """
+    if last.data_date is None or current.data_date is None:
+        return {"window": None, "count": 0, "groups": [], "items": []}
+    if last.task is None or last.task.empty or current.task is None or current.task.empty:
+        return {"window": None, "count": 0, "groups": [], "items": [], "warning": "TASK data is empty."}
+
+    start = last.data_date.normalize()
+    end = current.data_date.normalize()
+    if end < start:
+        start, end = end, start
+
+    last_aid_col = _pick_col(last.task, ["task_code", "activity_id"])
+    curr_aid_col = _pick_col(current.task, ["task_code", "activity_id"])
+    if not last_aid_col or not curr_aid_col:
+        return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": 0, "groups": [], "items": [], "warning": "Missing activity id column."}
+
+    curr_act_start_col, curr_act_finish_col = _detect_actual_cols(current.task)
+    last_act_start_col, last_act_finish_col = _detect_actual_cols(last.task)
+    if not curr_act_start_col:
+        return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": 0, "groups": [], "items": [], "warning": "Current TASK missing actual start column."}
+
+    current_df = current.task.copy()
+    last_df = last.task.copy()
+    current_df["_activity_id_key"] = current_df[curr_aid_col].astype(str).str.strip()
+    last_df["_activity_id_key"] = last_df[last_aid_col].astype(str).str.strip()
+    current_by_aid = current_df.drop_duplicates(subset=["_activity_id_key"]).set_index("_activity_id_key")
+
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+    curr_task_id_col = _pick_col(current.task, ["task_id"])
+
+    upstream_ids: set[str] = set()
+    if curr_task_id_col:
+        try:
+            target_row = _resolve_target_row(current.task, target_activity_id)
+            target_tid = str(target_row.get(curr_task_id_col)).strip()
+            upstream_ids = upstream_task_ids(current.taskpred, target_tid)
+        except Exception:
+            upstream_ids = set()
+
+    near_critical_activity_ids = near_critical_activity_ids or set()
+    critical_activity_ids = critical_activity_ids or set()
+    critical_path_activity_ids = critical_path_activity_ids or set()
+
+    items: list[dict[str, Any]] = []
+    for _, last_row in last_df.iterrows():
+        aid = str(last_row.get("_activity_id_key", "")).strip()
+        if not aid or aid.lower() == "nan" or aid not in current_by_aid.index:
+            continue
+
+        last_actual_finish = _parse_date(last_row.get(last_act_finish_col)) if last_act_finish_col else None
+        if last_actual_finish is not None:
+            continue
+
+        last_forecast_finish, last_finish_col = _select_forecast_finish_date(last.task, last_row)
+        if last_forecast_finish is None:
+            continue
+        last_finish_day = last_forecast_finish.normalize()
+        if not (start <= last_finish_day <= end):
+            continue
+
+        curr_row = current_by_aid.loc[aid]
+        curr_actual_start = _parse_date(curr_row.get(curr_act_start_col)) if curr_act_start_col else None
+        curr_actual_finish = _parse_date(curr_row.get(curr_act_finish_col)) if curr_act_finish_col else None
+        if curr_actual_start is None or curr_actual_finish is not None:
+            continue
+
+        curr_forecast_finish, curr_finish_col = _select_forecast_finish_date(current.task, curr_row)
+        if curr_forecast_finish is None:
+            continue
+        if curr_forecast_finish.normalize() <= last_forecast_finish.normalize():
+            continue
+
+        task_id = _clean_optional(curr_row.get(curr_task_id_col)) if curr_task_id_col else None
+        slip_days = int((curr_forecast_finish.normalize() - last_forecast_finish.normalize()).days)
+        items.append(
+            {
+                "activity_id": aid,
+                "task_name": _clean_optional(curr_row.get(name_col)) if name_col else None,
+                "wbs_name": _clean_optional(curr_row.get(wbs_name_col)) if wbs_name_col else None,
+                "wbs_path": _clean_optional(curr_row.get(wbs_path_col)) if wbs_path_col else None,
+                "last_forecast_finish_date": last_forecast_finish.isoformat(),
+                "last_finish_col": last_finish_col,
+                "current_forecast_finish_date": curr_forecast_finish.isoformat(),
+                "current_finish_col": curr_finish_col,
+                "finish_slip_days": slip_days,
+                "current_status": "in_progress",
+                "near_critical_current": aid in near_critical_activity_ids,
+                "critical_current": aid in critical_activity_ids,
+                "on_current_critical_path": aid in critical_path_activity_ids,
+                "in_target_upstream_network": bool(task_id and task_id in upstream_ids),
+            }
+        )
+
+    items.sort(key=lambda x: (not bool(x.get("on_current_critical_path")), not bool(x.get("near_critical_current")), -(x.get("finish_slip_days") or 0), x.get("wbs_path") or ""))
+    groups = _group_items_by_wbs(items)
+    return {
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+        "count": int(len(items)),
+        "group_count": int(len(groups)),
+        "groups": groups,
+        "items": items,
+    }
+
+
+def critical_path_change_summary(
+    last_path: Mapping[str, Any],
+    current_path: Mapping[str, Any],
+    *,
+    last_snapshot: XerSnapshot | None = None,
+    current_snapshot: XerSnapshot | None = None,
+    new_global: Mapping[str, Any] | None = None,
+    finish_extensions: Mapping[str, Any] | None = None,
+    trending: Mapping[str, Any] | None = None,
+    wbs_monitor: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    def primary(path_obj: Mapping[str, Any]) -> list[dict[str, Any]]:
+        paths = path_obj.get("paths", []) or []
+        if not paths:
+            return []
+        first = paths[0] or {}
+        chain = first.get("activity_chain", []) or []
+        return [x for x in chain if isinstance(x, dict)]
+
+    last_chain = primary(last_path)
+    curr_chain = primary(current_path)
+    last_ids = [str(x.get("activity_id")) for x in last_chain if x.get("activity_id")]
+    curr_ids = [str(x.get("activity_id")) for x in curr_chain if x.get("activity_id")]
+
+    added_ids = [x for x in curr_ids if x not in set(last_ids)]
+    removed_ids = [x for x in last_ids if x not in set(curr_ids)]
+
+    def summarize(ids: list[str], chain: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_id = {str(x.get("activity_id")): x for x in chain if x.get("activity_id")}
+        out: list[dict[str, Any]] = []
+        for aid in ids:
+            it = by_id.get(aid, {})
+            out.append(
+                {
+                    "activity_id": aid,
+                    "task_name": it.get("task_name"),
+                    "wbs_name": it.get("wbs_name"),
+                    "wbs_path": it.get("wbs_path"),
+                }
+            )
+        return out
+
+    last_wbs = {str(x.get("wbs_path") or x.get("wbs_name") or "").strip() for x in last_chain}
+    curr_wbs = {str(x.get("wbs_path") or x.get("wbs_name") or "").strip() for x in curr_chain}
+    last_wbs.discard("")
+    curr_wbs.discard("")
+
+    def chain_summary(chain: list[dict[str, Any]]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for it in chain:
+            items.append(
+                {
+                    "activity_id": it.get("activity_id"),
+                    "task_name": it.get("task_name"),
+                    "wbs_name": it.get("wbs_name"),
+                    "wbs_path": it.get("wbs_path"),
+                    "float_current_days": it.get("float_current_days"),
+                }
+            )
+        groups = _group_items_by_wbs(items)
+        return {
+            "length": len(items),
+            "wbs_paths": sorted({str(x.get("wbs_path") or x.get("wbs_name") or "").strip() for x in items if x.get("wbs_path") or x.get("wbs_name")}),
+            "groups": groups,
+            "items": items,
+        }
+
+    new_global = new_global or {}
+    finish_extensions = finish_extensions or {}
+    trending = trending or {}
+    wbs_monitor = wbs_monitor or {}
+
+    new_ids = {str(x.get("activity_id")) for x in (new_global.get("items", []) or []) if x.get("activity_id")}
+    finish_extension_by_id = {
+        str(x.get("activity_id")): x for x in (finish_extensions.get("items", []) or []) if x.get("activity_id")
+    }
+    eroding_by_id = {str(x.get("activity_id")): x for x in (trending.get("eroding_risks", []) or []) if x.get("activity_id")}
+    change_new_ids = {str(x) for x in (wbs_monitor.get("new_activity_ids", []) or [])}
+
+    pit = wbs_monitor.get("path_impact_tracker", {}) or {}
+    change_driving_ids = {str(x.get("activity_id")) for x in (pit.get("driving_delay_items", []) or []) if x.get("activity_id")}
+    change_alert_ids = {
+        str(x.get("to_activity_id"))
+        for x in (pit.get("cross_wbs_alerts", []) or [])
+        if x.get("to_activity_id")
+    }
+
+    curr_by_id = {str(x.get("activity_id")): x for x in curr_chain if x.get("activity_id")}
+    drivers: list[dict[str, Any]] = []
+
+    def add_driver(kind: str, aid: str, source: Mapping[str, Any], detail: str) -> None:
+        item = curr_by_id.get(aid, {})
+        drivers.append(
+            {
+                "driver_type": kind,
+                "activity_id": aid,
+                "task_name": source.get("task_name") or item.get("task_name"),
+                "wbs_name": source.get("wbs_name") or item.get("wbs_name"),
+                "wbs_path": source.get("wbs_path") or item.get("wbs_path"),
+                "detail": detail,
+                "finish_slip_days": source.get("finish_slip_days"),
+                "float_loss_days": source.get("float_loss_days"),
+                "float_current_days": source.get("float_current_days") or item.get("float_current_days"),
+            }
+        )
+
+    for aid in added_ids:
+        if aid in finish_extension_by_id:
+            src = finish_extension_by_id[aid]
+            add_driver(
+                "finish_extension_on_current_path",
+                aid,
+                src,
+                "An in-progress activity now forecasts later than it did in the previous update and is on the current critical path.",
+            )
+        if aid in eroding_by_id:
+            src = eroding_by_id[aid]
+            add_driver(
+                "float_erosion_on_current_path",
+                aid,
+                src,
+                "Float eroded faster than time passed and the activity is now part of the current critical path.",
+            )
+        if aid in new_ids:
+            add_driver(
+                "new_activity_on_current_path",
+                aid,
+                curr_by_id.get(aid, {}),
+                "A newly added activity is now part of the current critical path.",
+            )
+        if aid in change_new_ids or aid in change_driving_ids or aid in change_alert_ids:
+            add_driver(
+                "change_related_current_path_driver",
+                aid,
+                curr_by_id.get(aid, {}),
+                "Change/delay logic indicates this current-path activity is linked to change-related work or downstream cross-WBS impact.",
+            )
+
+    relationship_evidence: list[dict[str, Any]] = []
+    task_field_evidence: list[dict[str, Any]] = []
+    if last_snapshot is not None and current_snapshot is not None:
+        relationship_evidence = _relationship_change_evidence(
+            last_snapshot,
+            current_snapshot,
+            current_path_ids=curr_ids,
+            previous_path_ids=last_ids,
+        )
+
+        current_path_candidate_ids = list(dict.fromkeys(added_ids + [aid for aid in curr_ids if aid in set(last_ids)]))
+        for aid in current_path_candidate_ids:
+            changes = _task_field_changes(last_snapshot, current_snapshot, aid)
+            relevant_changes = [
+                ch
+                for ch in changes
+                if ch.get("field")
+                in {
+                    "forecast_start",
+                    "forecast_finish",
+                    "constraint_type",
+                    "constraint_date",
+                    "secondary_constraint_type",
+                    "secondary_constraint_date",
+                    "calendar",
+                    "remaining_duration",
+                    "original_duration",
+                    "status",
+                }
+            ]
+            if not relevant_changes:
+                continue
+            item = curr_by_id.get(aid, {})
+            task_field_evidence.append(
+                {
+                    "driver_type": "task_attribute_changed_on_current_path",
+                    "activity_id": aid,
+                    "task_name": item.get("task_name"),
+                    "wbs_name": item.get("wbs_name"),
+                    "wbs_path": item.get("wbs_path"),
+                    "changed_fields": relevant_changes,
+                    "detail": "One or more schedule attributes changed on an activity in the current primary critical path.",
+                }
+            )
+
+    # De-duplicate driver records while preserving evidence order.
+    seen_driver_keys: set[tuple[str, str]] = set()
+    deduped_drivers: list[dict[str, Any]] = []
+    for d in drivers:
+        key = (str(d.get("driver_type")), str(d.get("activity_id")))
+        if key in seen_driver_keys:
+            continue
+        seen_driver_keys.add(key)
+        deduped_drivers.append(d)
+
+    possible_shift_causes = deduped_drivers + relationship_evidence + task_field_evidence
+    changed = bool(added_ids or removed_ids)
+    return {
+        "changed": changed,
+        "comparison_basis": "primary critical path to target, last update vs current update",
+        "last_path_length": len(last_ids),
+        "current_path_length": len(curr_ids),
+        "previous_primary_path": chain_summary(last_chain),
+        "current_primary_path": chain_summary(curr_chain),
+        "added_to_current_path_count": len(added_ids),
+        "removed_from_previous_path_count": len(removed_ids),
+        "added_to_current_path": summarize(added_ids, curr_chain),
+        "removed_from_previous_path": summarize(removed_ids, last_chain),
+        "current_wbs_added": sorted(curr_wbs - last_wbs),
+        "previous_wbs_removed": sorted(last_wbs - curr_wbs),
+        "likely_shift_drivers": deduped_drivers,
+        "relationship_change_evidence": relationship_evidence,
+        "task_field_change_evidence": task_field_evidence,
+        "possible_shift_causes": possible_shift_causes,
+        "cause_assessment": (
+            "Supported shift drivers are listed in possible_shift_causes."
+            if possible_shift_causes
+            else (
+                "The current and previous primary critical paths differ, but the specific cause is not determinable from the provided schedule fields."
+                if changed
+                else "No critical path shift detected."
+            )
+        ),
+        "warning": (last_path.get("warning") or current_path.get("warning")),
+    }
+
+
 def compare_three_way(
     baseline: XerSnapshot,
     last: XerSnapshot,
@@ -1525,7 +2276,43 @@ def compare_three_way(
     critical_global = critical_activities_all_wbs(current)
     new_global = new_activities_all_wbs(last, current)
     accomplished = work_accomplished(last, current)
+    critical_path_last = critical_path_to_target(last, target_activity_id)
     critical_path = critical_path_to_target(current, target_activity_id)
+
+    near_ids = {str(x) for x in trending.get("activity_ids", []) or []}
+    near_ids.update(str(x.get("activity_id")) for x in trending.get("near_critical", []) or [] if x.get("activity_id"))
+    critical_ids = {str(x.get("activity_id")) for x in critical_global.get("items", []) or [] if x.get("activity_id")}
+    critical_path_ids = {
+        str(x.get("activity_id"))
+        for p in critical_path.get("paths", []) or []
+        for x in (p.get("activity_chain", []) or [])
+        if x.get("activity_id")
+    }
+    finish_extensions = finish_extensions_in_progress(
+        last,
+        current,
+        target_activity_id=target_activity_id,
+        near_critical_activity_ids=near_ids,
+        critical_activity_ids=critical_ids,
+        critical_path_activity_ids=critical_path_ids,
+    )
+    critical_path_change = critical_path_change_summary(
+        critical_path_last,
+        critical_path,
+        last_snapshot=last,
+        current_snapshot=current,
+        new_global=new_global,
+        finish_extensions=finish_extensions,
+        trending=trending,
+        wbs_monitor=wbs,
+    )
+    look_ahead = look_ahead_window_analysis(
+        current,
+        horizon_days=look_ahead_horizon_days,
+        near_critical_activity_ids=near_ids,
+        critical_activity_ids=critical_ids,
+        critical_path_activity_ids=critical_path_ids,
+    )
 
     return {
         "settings": {
@@ -1547,6 +2334,10 @@ def compare_three_way(
         "critical_activities_global": critical_global,
         "new_activities_global": new_global,
         "work_accomplished": accomplished,
+        "finish_extensions_in_progress": finish_extensions,
+        "look_ahead_window_analysis": look_ahead,
+        "critical_path_change": critical_path_change,
+        "previous_critical_path_to_target": critical_path_last,
         "critical_path_to_target": critical_path,
     }
 
@@ -1555,7 +2346,8 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     """
     Produce a narrative-friendly digest:
       - removes technical database IDs (e.g., task_id)
-      - keeps activity_id, task_name, and the key variances/trends
+      - removes activity IDs from the AI-facing payload where possible
+      - keeps task names, WBS groups, and the key variances/trends
     """
     update_period = compare_result.get("update_period", {}) or {}
     milestone = compare_result.get("milestone", {}) or {}
@@ -1564,13 +2356,23 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     critical_global = compare_result.get("critical_activities_global", {}) or {}
     new_global = compare_result.get("new_activities_global", {}) or {}
     accomplished = compare_result.get("work_accomplished", {}) or {}
+    finish_extensions = compare_result.get("finish_extensions_in_progress", {}) or {}
+    look_ahead = compare_result.get("look_ahead_window_analysis", {}) or {}
+    critical_path_change = compare_result.get("critical_path_change", {}) or {}
     critical_path = compare_result.get("critical_path_to_target", {}) or {}
     settings = compare_result.get("settings", {}) or {}
+
+    def _without_activity_ids(value: Any) -> Any:
+        id_keys = {"activity_id", "target_activity_id", "root_activity_id", "from_activity_id", "to_activity_id", "path_activity_ids"}
+        if isinstance(value, dict):
+            return {k: _without_activity_ids(v) for k, v in value.items() if k not in id_keys}
+        if isinstance(value, list):
+            return [_without_activity_ids(v) for v in value]
+        return value
 
     def ms_part(label: str) -> dict[str, Any]:
         part = milestone.get(label, {}) or {}
         return {
-            "activity_id": part.get("activity_id"),
             "task_name": part.get("task_name"),
             "finish_date": part.get("finish_date"),
         }
@@ -1579,7 +2381,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (trending.get("eroding_risks", []) or []):
         eroding.append(
             {
-                "activity_id": r.get("activity_id"),
                 "task_name": r.get("task_name"),
                 "wbs_name": r.get("wbs_name"),
                 "wbs_path": r.get("wbs_path"),
@@ -1596,7 +2397,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (wbs.get("new_activities", []) or []):
         new_change.append(
             {
-                "activity_id": r.get("activity_id"),
                 "task_name": r.get("task_name"),
                 "wbs_name": r.get("wbs_name"),
             }
@@ -1607,7 +2407,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (cps.get("items", []) or []):
         cps_items.append(
             {
-                "root_activity_id": r.get("root_activity_id"),
                 "summary": r.get("summary"),
                 "cross_wbs_top": r.get("cross_wbs_top"),
                 "has_critical_path_driver": r.get("has_critical_path_driver"),
@@ -1619,8 +2418,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (pit.get("cross_wbs_alerts", []) or []):
         cross_wbs_alerts.append(
             {
-                "from_activity_id": r.get("from_activity_id"),
-                "to_activity_id": r.get("to_activity_id"),
                 "to_task_name": r.get("to_task_name"),
                 "to_wbs_top": r.get("to_wbs_top"),
             }
@@ -1662,7 +2459,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
 
             grouped[key]["items"].append(
                 {
-                    "activity_id": r.get("activity_id"),
                     "task_name": r.get("task_name"),
                     "float_last_days": r.get("float_last_days"),
                     "float_current_days": r.get("float_current_days"),
@@ -1683,7 +2479,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (new_global.get("items", []) or []):
         new_global_items.append(
             {
-                "activity_id": r.get("activity_id"),
                 "task_name": r.get("task_name"),
                 "wbs_name": r.get("wbs_name"),
                 "wbs_path": r.get("wbs_path"),
@@ -1708,7 +2503,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     for r in (critical_global.get("items", []) or []):
         critical_items.append(
             {
-                "activity_id": r.get("activity_id"),
                 "task_name": r.get("task_name"),
                 "wbs_name": r.get("wbs_name"),
                 "wbs_path": r.get("wbs_path"),
@@ -1730,7 +2524,7 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
 
-    return {
+    digest = {
         "settings": {
             "variance_threshold": settings.get("variance_threshold"),
             "look_ahead_horizon_days": settings.get("look_ahead_horizon_days"),
@@ -1743,7 +2537,6 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "days_last_to_current": update_period.get("days_last_to_current"),
         },
         "milestone_variance": {
-            "target_activity_id": milestone.get("target_activity_id"),
             "baseline": ms_part("baseline"),
             "last": ms_part("last"),
             "current": ms_part("current"),
@@ -1782,8 +2575,12 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "items": new_global_items,
         },
         "work_accomplished": accomplished,
+        "finish_extensions_in_progress": finish_extensions,
+        "look_ahead_window_analysis": look_ahead,
+        "critical_path_change": critical_path_change,
         "critical_path_to_target": critical_path,
     }
+    return _without_activity_ids(digest)
 
 
 def _main() -> int:
