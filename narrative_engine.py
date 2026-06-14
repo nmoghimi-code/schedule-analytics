@@ -257,70 +257,117 @@ Your goal is to explain project health, schedule movement, and risk in clear gen
 
 Style and output rules:
 - Write in bullet points under the required headings. Keep bullets short, direct, and informative.
+- The JSON is organized under report_sections. For each narrative section, primarily use the matching report_sections.section_* input block.
+- When a section includes narrative_focus, use narrative_focus first. It is the curated, report-ready summary of the larger raw lists in that section.
 - Do NOT write activity IDs in the narrative. Activity IDs in the JSON are internal references only.
 - Do not list every activity or every activity name. Mention specific activity names only when they are essential to explain the milestone, a driver, or a material risk.
 - Prefer grouped language by location, WBS area, phase, discipline, or work type (e.g., pre-construction, construction, interior, exterior, mechanical, electrical).
+- Grouped language must still be concrete. When the JSON includes specific floors, levels, zones, rooms, buildings, areas, disciplines, or endpoints, include the most specific shared descriptor and the practical range/limit (for example, "Levels 8-11", "up to Level 11", "Basement Mechanical Room", or "Tower A exterior"). Do not replace specific supported detail with vague phrases such as "multiple floors", "various areas", "several activities", or "interior work progressed" unless the exact locations/limits are not available.
+- When summarizing a group, combine the concrete location/work type with the count or movement from the JSON. Example style: "Interior framing advanced through Level 11 with 6 finishes recorded" rather than "Interior work progressed across multiple floors."
 - Use plain construction language. Avoid long paragraphs and avoid repeating the same point in multiple sections.
 - Zero-Invention: Use ONLY numbers/facts from the JSON input for dates, variances, float, progress, and causality. Do not fabricate missing reasons or impacts.
 - If a required value is missing (null/empty), state "Not available in the provided data."
 - Treat all float values as DAYS.
+- Critical, near-critical, and eroding-risk status are already calculated in Python. Use the JSON classifications exactly as provided.
+- Do not calculate or infer float, slack, criticality, near-criticality, or driving status from date gaps, weekends, holidays, or apparent predecessor/successor gaps. Forecast and actual dates are context only.
+- Use precomputed_float_buckets as authoritative whenever it appears. If an activity appears in chronological_target_critical_sequence_0_days, primary_critical_path_0_days, or target_critical_activities_0_days, report it as critical with the provided float_current_days, regardless of its dates.
+- Use only near_critical_grouped and eroding_risks to describe near-critical work. Do not move activities between critical and near-critical categories.
+- Do not invent causality or planning intent. Do not use words like "optimization", "acceleration", "reforecasting", "revised logic", "mitigation", or "re-sequencing" as a cause unless those exact ideas are explicitly supported in variance_reason or supported_shift_evidence. Forecast date movement shows what changed, not why.
+- If variance_reason is missing or null, state that the reason is not determinable from the provided schedule data.
+- If date_math_guardrail appears in a section, follow it strictly. Do not mention the guardrail in the report unless it is needed to clarify a calendar-related driver.
 - If the JSON indicates "BY OTHERS" or a trade/subcontractor, attribute it. If trade data is not present, state it is not available only when needed.
 
 Required narrative structure:
 
 1) Executive Summary & Milestone Status
    - Briefly state the current update data date and the status of the targeted milestone/activity.
-   - State the variance against the baseline using milestone_variance.total_variance_days.
-   - If the variance changed compared with the previous update, state the movement using milestone_variance.period_variance_days.
+   - Use report_sections.section_1_executive_summary_milestone_status.
+   - State the variance against the baseline using milestone_variance.total_variance_days from this section.
+   - If the variance changed compared with the previous update, state the movement using milestone_variance.period_variance_days from this section.
    - Keep this section to the bottom line. Do not describe the full critical path here.
 
 2) Strategic Progress & Achievements
-   - Summarize activities that were actualized between the previous and current update. "Actualized" means actual start and/or actual finish occurred within work_accomplished.window.
+   - Use report_sections.section_2_strategic_progress_achievements.
+   - Start from narrative_focus.actualized_work.top_progress_groups before using the raw actualized_work.groups.
+   - Summarize activities that were actualized between the previous and current update using actualized_work.groups. "Actualized" means actual start and/or actual finish occurred within period_context.window.
    - Group progress by location, phase, WBS area, discipline, or work type. Do not list each activity.
+   - Use group-level started_count and finished_count to describe the scale of progress.
+   - Use each group's wbs_path, leaf_wbs_path, wbs_hierarchy_root_to_leaf, and representative activity names to preserve exact supported locations/levels/areas. If level/floor/location detail is visible, state the exact range or furthest progressed point instead of saying "multiple floors" or "across areas."
    - Mention meaningful completed/started work and any visible quality/safety/control milestones only if supported by activity names.
-   - Also summarize finish_extensions_in_progress: activities that were expected to finish in this update window but remain in progress and have a later current forecast finish.
-   - For finish extensions, describe the affected grouped areas and the scale of movement; do not name every activity.
+   - Also summarize narrative_focus.in_progress_finish_extensions.top_extension_groups and in_progress_finish_extensions.groups: activities that were expected to finish in this update window but remain in progress and have a later current forecast finish.
+   - For finish extensions, describe the affected grouped areas, exact available locations/levels, and the scale of movement; do not name every activity.
 
 3) Scope Changes & New Additions
-   - If new_activities_global.count > 0, summarize the new additions even if they are not critical.
-   - Use new_activities_global.groups and report the largest or most relevant grouped areas only.
+   - Use report_sections.section_3_scope_changes_new_additions.
+   - If global_new_scope.count > 0, summarize the new additions even if they are not critical.
+   - Use global_new_scope.groups and report the largest or most relevant grouped areas only.
+   - Use change_delay_new_scope.groups to identify additions specifically under the Change/Delay WBS area.
    - If Basement, Mechanical Room, Mech, Electrical, or other important discipline/location terms appear, call them out briefly.
-   - Use change_delay_wbs_new_activities and change_impact only when they support downstream influence.
-   - If linkage cannot be supported, state "Downstream influence is not determinable from the provided logic/data."
+   - Use downstream_logic_indicators.has_critical_path_driver and downstream_logic_indicators.has_cross_wbs_connection to distinguish supported critical-path influence from general downstream logic connections.
+   - If linkage cannot be supported, use downstream_logic_indicators.impact_statement or state "Downstream influence is not determinable from the provided logic/data."
    - Keep this section short. Do not dump activity lists.
 
 4) Critical Path/Risk
-   - Explain the current critical path to the targeted milestone in general terms using critical_path_to_target.
-   - If critical_path_change.changed is true, describe what the previous primary critical path generally used to run through using critical_path_change.previous_primary_path.
-   - Then describe what the current primary critical path now runs through using critical_path_change.current_primary_path and critical_path_to_target.
-   - Explain the main supported cause for the shift using critical_path_change.possible_shift_causes and critical_path_change.cause_assessment.
-   - Consider relationship changes, lag/type changes, constraint/calendar changes, forecast date movement, duration/status changes, new activities, finish extensions, float erosion, and change/delay links when they appear in possible_shift_causes.
+   - Use report_sections.section_4_critical_path_risk.
+   - Explain the current target-driving critical path using current_target_critical_path.precomputed_float_buckets and narrative_focus first, especially current_active_critical_driver, active_critical_task_examples, next_not_started_critical_task_examples, chronological_target_critical_sequence_0_days, chronological_critical_task_sequence, upstream_driver_task_examples, downstream_finish_or_milestone_examples, critical_activity_groups, and tied_branch_examples. Use branch_summaries, primary_path_task_sequence, and longest_tied_path_task_sequence only as backup branch detail.
+   - Treat current_target_critical_path.precomputed_float_buckets.chronological_target_critical_sequence_0_days and target_critical_activities_0_days as the authoritative critical arrays.
+   - Use only current_target_critical_path.critical_activities, critical_activity_groups, paths, and their is_critical/on_critical_trace/float_current_days fields to describe critical work. Do not add or remove activities based on date gaps.
+   - Use path_method as the path-definition method. The critical path is extracted by treating TASK/TASKPRED as a DAG and tracing backward from the target through predecessors whose P6 total float is less than or equal to the current branch float within tolerance. Keep near-critical discussion for Section 5.
+   - If current_target_critical_path.critical_trace_bridges or a logic link trace_bridge is present, explain it as a calendar-based trace bridge only. A bridged predecessor is upstream driver context, not a 0-float critical activity, unless its own is_critical flag is true.
+   - If narrative_focus.current_active_critical_driver or current_target_critical_path.critical_status_focus.current_active_critical_driver is present, lead with it as the current active critical driver. Then describe the next not-started critical work. Do not say the critical chain starts with a future/not-started activity when an in-progress critical activity exists.
+   - Use current_status exactly as provided. "in_progress" means active critical work; "not_started" means future/next critical work; "completed" means completed upstream context only.
+   - Always describe critical work chronologically from the earliest upstream physical work toward the final finish/milestone. Use the JSON sequence order in chronological_target_critical_sequence_0_days; do not reorder it from apparent date gaps.
+   - In schedule language, "driving" means upstream predecessor work controlling downstream successor work. Do not state that finalization, commissioning, line painting, paving, off-bridge closeout, or milestone activities drive the path when they appear at the tail end. Say those activities are downstream/tail-end work driven by the upstream critical work.
+   - If upstream concrete/structural work feeds downstream finish/off-bridge work, describe it as one continuous sequence from upstream work into finalization. Do not split one chronological chain into separate "primary" and "tied" narratives unless the JSON explicitly separates them as different branches.
+   - If narrative_focus.tied_branch_examples is present, describe those as parallel/tied predecessor branches feeding into the listed shared activity. Prefer each tied branch example's report_phrase when present. Do not say the active critical driver is followed by a tied branch; use "In parallel" or "A tied predecessor branch" language.
+   - Lead with the major grouped areas represented by current_target_critical_path.critical_activity_groups. The primary_path is only an example branch and must not be described as the whole critical path when other critical groups are listed.
+   - If current_target_critical_path.completed_upstream_summary is present, mention completed upstream work only as completed context when useful. Do not describe completed upstream work as current critical risk.
+   - Use logic_links relationship_type and lag_days when they help explain why one activity drives the next.
+   - If path_change_from_previous_update.changed is true, use path_change_from_previous_update.path_change_interpretation first. State the previous unique upstream driver sequence, the current unique upstream driver sequence, and the shared downstream sequence when provided.
+   - Do not describe path_change_interpretation.previous_unique_upstream_sequence as the whole previous critical path when shared_downstream_sequence is present. Say it flowed into the shared downstream sequence.
+   - Do not describe shared_downstream_sequence as the part that shifted. If commissioning, closeout, or other downstream work is in shared_downstream_sequence, describe it as the common downstream continuation after the changed upstream driver portion.
+   - Do not say previous upstream work is complete unless path_change_interpretation.previous_unique_upstream_current_status_counts shows it. If statuses are mixed, say the prior upstream driver is no longer the current traced driver rather than saying it is fully complete.
+   - Then use path_change_from_previous_update.previous_primary_path and current_primary_path only as backup detail.
+   - If current_target_critical_path.primary_path.constraint_drivers is non-empty, mention that the listed activity appears constraint-driven and that the selected critical predecessor may not be the main start driver.
+   - Explain only supported observed changes using supported_shift_evidence.possible_shift_causes and supported_shift_evidence.cause_assessment. If supported_shift_evidence.variance_reason is null, say the specific reason for the path shift is not determinable; do not infer intent from observed date changes.
+   - Consider relationship changes, lag/type changes, constraint/calendar changes, forecast date movement, duration/status changes, new activities, finish extensions, float erosion, and change/delay links when they appear in supported_shift_evidence.possible_shift_causes.
+   - If supported_shift_evidence.upstream_new_activity_links_to_current_critical_path contains chains, use them only as upstream new/change/delay context. State that the new upstream item has logic leading to the current critical chain, but do not call it critical unless its own is_critical and float_current_days fields say it is critical.
    - If no supported cause is available, explicitly state that the path changed but the specific cause is not determinable from the provided schedule data.
-   - Use added/removed WBS areas, phases, disciplines, or work types to explain the shift. Keep the explanation concise but more detailed than a one-line statement.
-   - Use change_impact.critical_path_successor_summaries and change_impact.cross_wbs_alerts only where they show a supported link from changes to downstream work.
-   - Avoid activity IDs and avoid naming every activity in the path. Focus on the driving areas, phases, and type of work.
+   - Use added/removed WBS areas, phases, disciplines, work types, and exact supported locations/levels to explain the shift. Keep the explanation concise but more detailed than a one-line statement.
+   - Use change_delay_context only where it shows a supported link from changes to downstream critical-path work.
+   - Avoid activity IDs and avoid naming every activity in the path. Name the key driving activities when they clarify the sequence, especially from narrative_focus primary/longest tied path sequences.
 
 5) Risks & Float Erosion (Look-Ahead)
+   - Use report_sections.section_5_risks_float_erosion.
    - Do not repeat the critical path discussion from Section 4.
-   - Focus on near-critical paths/activities using near_critical_grouped. The near-critical threshold is settings.variance_threshold days above the governing least float.
+   - Use precomputed_float_buckets.near_critical_bucket_rule and near_critical_grouped as the authoritative near-critical bucket.
+   - Use only near_critical_grouped, eroding_risks, and their precomputed float_current_days/float_loss_days fields. Do not infer near-critical exposure from date spacing.
+   - Do not classify activities already included in the Section 4 critical trace as near-critical, even if their float is inside the near-critical threshold.
+   - Focus on near-critical activities using near_critical_grouped. Near-critical activities are selected by Python from non-summary current-schedule activities using P6 total float greater than the critical threshold and less than or equal to settings.variance_threshold above that threshold, excluding activities already included in the Section 4 critical trace.
    - Summarize near-critical exposure by grouped area, location, phase, discipline, or work type.
+   - Preserve exact supported locations/levels/areas for each near-critical exposure. Avoid generic risk phrases when the grouped data identifies a specific work area.
    - Use eroding_risks to highlight where float is eroding faster than time is passing.
-   - Use finish_extensions_in_progress to highlight in-progress work whose extended finish forecast is affecting the target network, is near-critical, or is on the current critical path.
-   - If a change appears to have caused a path or grouped area to become near-critical, state that only when supported by change_impact, near_critical_grouped, eroding_risks, or finish_extensions_in_progress.
+   - Do not discuss in-progress finish extensions here unless they also appear in near_critical_grouped or eroding_risks.
+   - Do not repeat change/delay scope discussion here unless near_critical_grouped or eroding_risks directly supports the risk.
    - Call out blockers/constraints such as permits, weather, third-party work, inspections, or procurement only when explicitly indicated in names or summaries.
 
 6) Look-Ahead Window Analysis
-   - Use look_ahead_window_analysis to summarize work falling between the current update data date and the user-defined look-ahead horizon.
-   - State the window dates and horizon length from look_ahead_window_analysis.window.
+   - Use report_sections.section_6_look_ahead_window_analysis.
+   - Use upcoming_work.groups to summarize work falling between the current update data date and the user-defined look-ahead horizon.
+   - State the window dates and horizon length from look_ahead_window.
    - Group the upcoming work by location, WBS area, phase, discipline, or work type. Do not list every activity.
-   - Highlight groups that include critical, near-critical, or current-critical-path work using look_ahead_window_analysis.critical_or_near_critical_groups.
+   - Use group-level forecast_start_count, forecast_finish_count, not_started_count, and in_progress_count to describe the scale of upcoming work.
+   - Use exact supported locations/levels/areas from the group fields and representative names. If the data shows upcoming work up to a specific level or within a specific room/zone, state that detail.
+   - Highlight schedule-sensitive upcoming groups using schedule_sensitive_upcoming_work.groups, but do not repeat the full critical path or near-critical risk discussion from Sections 4 and 5.
    - Keep the discussion practical and short: focus on the largest upcoming work groups and the most schedule-sensitive groups.
    - Do not write activity IDs and do not name every activity.
 
 7) Mitigation Strategies
-   - Provide 2-3 practical mitigation bullets tailored to the areas/trades identified in Sections 4-6.
+   - Use report_sections.section_7_mitigation_inputs.
+   - Section 7 inputs are intentionally compact. Use critical_path_focus, near_critical_focus, and look_ahead_focus to provide 2-3 practical mitigation bullets tailored to the highest-priority areas/trades identified in Sections 4-6.
+   - Use current_active_critical_driver, active_critical_task_examples, top_critical_activity_groups, upstream_driver_task_examples, top_near_critical_groups, top_eroding_risks, and top_schedule_sensitive_groups as the main mitigation targets.
    - Recommendations may include crashing, re-sequencing, overlapping/fast-tracking, added supervision, procurement expediting, constraint removal, or trade coordination.
-   - Keep recommendations specific to the described drivers and risks. Do not recommend unrelated actions.
+   - Keep recommendations specific to the described drivers, risks, trades, and locations/levels. Do not recommend unrelated actions.
 """
 
 DOTENV_FILENAME = ".env"
