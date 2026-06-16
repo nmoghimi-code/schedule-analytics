@@ -472,6 +472,23 @@ def near_critical_trending(
 
     eroding = [x for x in rows if x["eroding_risk"]]
 
+    # Driving relationships among the near-critical activities themselves, so the narrative can describe
+    # how near-critical work sequences (e.g. "removal drives repair drives forming") instead of bare counts.
+    nc_name_by_id = {str(r["activity_id"]): r.get("task_name") for r in rows}
+    nc_ids = set(nc_name_by_id.keys())
+    driving_links: list[dict[str, Any]] = []
+    if nc_ids:
+        for (pred_aid, succ_aid), rec in _relationship_records_by_pair(current).items():
+            if pred_aid in nc_ids and succ_aid in nc_ids:
+                driving_links.append(
+                    {
+                        "from_task_name": nc_name_by_id.get(pred_aid),
+                        "to_task_name": nc_name_by_id.get(succ_aid),
+                        "relationship_type": rec.get("relationship_type"),
+                        "lag_days": rec.get("lag_days"),
+                    }
+                )
+
     return {
         "days_between": days_between,
         "least_float_current_days": critical_network.get("least_float_current_days"),
@@ -480,6 +497,7 @@ def near_critical_trending(
         "excluded_activity_count": int(len(exclude_activity_ids)),
         "near_critical_count": int(len(rows)),
         "near_critical": rows,
+        "driving_links": driving_links,
         "method": critical_network.get("method"),
         "eroding_risk_count": int(len(eroding)),
         "eroding_risks": eroding,
@@ -1205,13 +1223,54 @@ def critical_path_to_target(
             upstream_activity_ids.add(pred_id)
             q.append(pred_id)
 
+    # Target health: warn when the chosen target cannot drive a meaningful critical/delay analysis.
+    # The most common trap is a contractual-date milestone with no predecessor logic (e.g. "Substantial
+    # Completion Date" set only by a constraint). It traces back to itself and gets labelled critical
+    # despite carrying large float, which makes the critical-path and delay story meaningless.
+    target_direct_pred_count = len(pred_by_succ.get(target_aid, set()))
+    target_upstream_count = len(upstream_activity_ids) - 1  # exclude the target itself
+    target_is_off_critical = (
+        target_float_days is not None
+        and target_float_days > project_least_float_current_days + max(near_buffer_days, float_tolerance_days)
+    )
+    target_warnings: list[str] = []
+    if target_direct_pred_count == 0:
+        target_warnings.append(
+            "Target activity has no predecessor logic, so it has no driving path. The critical-path/delay "
+            "analysis will collapse to the target alone. Pick a logic-driven completion milestone instead."
+        )
+    elif target_upstream_count == 0:
+        target_warnings.append(
+            "Target activity has predecessors but none resolve to traceable upstream activities "
+            "(they may be summary/LOE rows or missing from TASK)."
+        )
+    if target_is_off_critical:
+        target_warnings.append(
+            f"Target total float is {target_float_days:.1f} days vs the project minimum of "
+            f"{project_least_float_current_days:.1f} days, so the target is not on (or near) the project critical "
+            "path. Verify this is the intended driving milestone."
+        )
+    target_health = {
+        "target_direct_predecessor_count": int(target_direct_pred_count),
+        "target_upstream_activity_count": int(target_upstream_count),
+        "target_float_current_days": target_float_days,
+        "project_least_float_current_days": project_least_float_current_days,
+        "target_is_off_critical_path": bool(target_is_off_critical),
+        "has_driving_logic": bool(target_direct_pred_count > 0 and target_upstream_count > 0),
+        "warnings": target_warnings,
+    }
+
     critical_ids = {
         aid
         for aid in upstream_activity_ids
         if float_days_by_activity.get(aid) is not None
         and float_days_by_activity[aid] <= governing_critical_float_days + float_tolerance_days
     }
-    near_critical_candidate_ids = set(float_days_by_activity.keys()) - excluded_summary_activity_ids
+    # Scope near-critical to the target's own upstream network (everything that feeds the target),
+    # mirroring the critical-path scope. This keeps near-critical relevant to the target: when the
+    # target is a mid-project milestone (e.g. a Stage 1 completion), unrelated parallel work (e.g.
+    # Stage 2 abutments) is excluded rather than reported as near-critical risk to this target.
+    near_critical_candidate_ids = upstream_activity_ids - excluded_summary_activity_ids
     near_critical_ids_set = {
         aid
         for aid in near_critical_candidate_ids
@@ -1572,6 +1631,8 @@ def critical_path_to_target(
         "target_activity_id": target_aid,
         "target_task_name": name_by_activity.get(str(target_aid)),
         "target_wbs_path": wbs_path_by_activity.get(str(target_aid)),
+        "target_health": target_health,
+        "target_warning": (" ".join(target_health["warnings"]) or None),
         "target_float_current_days": target_float_days,
         "least_float_current_days": governing_critical_float_days,
         "project_least_float_current_days": project_least_float_current_days,
@@ -2355,6 +2416,23 @@ def look_ahead_window_analysis(
     risk_items = [x for x in items if x.get("critical_current") or x.get("near_critical_current") or x.get("on_current_critical_path")]
     risk_groups = _group_items_by_wbs(risk_items)
 
+    # Driving relationships among the upcoming activities, so the look-ahead can describe how the
+    # window's work sequences rather than only listing counts per area.
+    name_by_id = {str(x.get("activity_id")): x.get("task_name") for x in items}
+    upcoming_ids = set(name_by_id.keys())
+    driving_links: list[dict[str, Any]] = []
+    if upcoming_ids:
+        for (pred_aid, succ_aid), rec in _relationship_records_by_pair(current).items():
+            if pred_aid in upcoming_ids and succ_aid in upcoming_ids:
+                driving_links.append(
+                    {
+                        "from_task_name": name_by_id.get(pred_aid),
+                        "to_task_name": name_by_id.get(succ_aid),
+                        "relationship_type": rec.get("relationship_type"),
+                        "lag_days": rec.get("lag_days"),
+                    }
+                )
+
     return {
         "window": {"start": start.isoformat(), "end": end.isoformat(), "horizon_days": horizon},
         "count": int(len(items)),
@@ -2364,6 +2442,7 @@ def look_ahead_window_analysis(
         "groups": groups,
         "critical_or_near_critical_groups": risk_groups,
         "items": items,
+        "driving_links": driving_links,
     }
 
 
@@ -3264,6 +3343,8 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "least_float_current_days": src.get("least_float_current_days"),
             "cutoff_current_days": src.get("cutoff_current_days"),
             "groups": groups,
+            # Predecessor links among near-critical activities; use to describe how near-critical work sequences.
+            "driving_links": (src.get("driving_links") or [])[:40],
         }
 
     new_global_items = []
@@ -4373,6 +4454,8 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                 "count": int(len(cleaned_items)),
                 "group_count": int(len(groups)),
                 "groups": groups,
+                # Predecessor links among upcoming activities; use to describe how the window's work sequences.
+                "driving_links": (src.get("driving_links") or [])[:40],
             },
             "schedule_sensitive_upcoming_work": {
                 "count": int(sum(g.get("item_count", 0) for g in sensitive_groups)),
@@ -4449,9 +4532,16 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     critical_sequence_role_summary = _critical_sequence_role_examples(critical_activity_facts)
     critical_status_focus_summary = _critical_status_focus(critical_activity_facts)
     chronological_critical_sequence_summary = {
-        "definition": "All target critical activities sorted chronologically from earliest upstream work to final finish/milestone; use this before branch examples for the Section 4 narrative.",
+        "definition": "The COMPLETE SET of target critical activities, listed by date only. This is NOT a logical predecessor chain.",
         "sequence_order": "earliest_forecast_or_restart_start_to_latest_finish_or_milestone",
         "sequence_is_complete_target_critical_set": True,
+        "is_logical_predecessor_order": False,
+        "narration_rule": (
+            "Use this only as the set of critical activities and for date context. Do NOT narrate it as one linear "
+            "chain and do NOT say one activity is 'followed by' or 'drives' the next based on this order, because "
+            "parallel branches are interleaved by date. For logical predecessor order use primary_critical_path_0_days "
+            "and the primary_path.logic_links; describe tied/parallel branches as parallel, not sequential."
+        ),
         "activity_chain": critical_activity_facts,
         "current_status_focus": critical_status_focus_summary,
         **critical_sequence_role_summary,

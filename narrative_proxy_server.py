@@ -93,6 +93,31 @@ def generate(
     return JSONResponse({"text": text, "model": str(model)})
 
 
+@app.post("/v1/delay")
+def generate_delay(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    _require_auth(authorization)
+
+    if "data_digest" not in payload:
+        raise HTTPException(status_code=400, detail="Missing 'data_digest' in request body.")
+
+    data_digest = payload["data_digest"]
+    if not isinstance(data_digest, dict):
+        raise HTTPException(status_code=400, detail="'data_digest' must be a JSON object.")
+
+    model = payload.get("model") or "gemini-2.5-flash"
+    instruction = payload.get("instruction")
+
+    try:
+        text = ne.generate_delay_report(data_digest, instruction=instruction, model=str(model))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return JSONResponse({"text": text, "model": str(model)})
+
+
 def create_user_token() -> tuple[str, str]:
     token = secrets.token_urlsafe(32)
     return token, _sha256_hex(token)

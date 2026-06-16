@@ -309,16 +309,17 @@ Required narrative structure:
 
 4) Critical Path/Risk
    - Use report_sections.section_4_critical_path_risk.
-   - Explain the current target-driving critical path using current_target_critical_path.precomputed_float_buckets and narrative_focus first, especially current_active_critical_driver, active_critical_task_examples, next_not_started_critical_task_examples, chronological_target_critical_sequence_0_days, chronological_critical_task_sequence, upstream_driver_task_examples, downstream_finish_or_milestone_examples, critical_activity_groups, and tied_branch_examples. Use branch_summaries, primary_path_task_sequence, and longest_tied_path_task_sequence only as backup branch detail.
-   - Treat current_target_critical_path.precomputed_float_buckets.chronological_target_critical_sequence_0_days and target_critical_activities_0_days as the authoritative critical arrays.
+   - Explain the current target-driving critical path using current_target_critical_path.precomputed_float_buckets and narrative_focus first, especially current_active_critical_driver, active_critical_task_examples, next_not_started_critical_task_examples, upstream_driver_task_examples, downstream_finish_or_milestone_examples, critical_activity_groups, and tied_branch_examples. Use current_target_critical_path.primary_path / precomputed_float_buckets.primary_critical_path_0_days as the source of the logical sequence order (what drives what). Use chronological_target_critical_sequence_0_days only for the complete set of critical activities and date context, never for predecessor order.
+   - Treat current_target_critical_path.precomputed_float_buckets.chronological_target_critical_sequence_0_days and target_critical_activities_0_days as the authoritative SET of critical activities (membership and float only). They are sorted by date and are NOT a logical predecessor chain — see the next rule before describing any sequence.
+   - For the logical order of the path (what drives what), follow current_target_critical_path.precomputed_float_buckets.primary_critical_path_0_days (equivalently current_target_critical_path.primary_path.activity_chain), in its given upstream-to-target order, together with primary_path.logic_links. Only state that one activity is "followed by", "drives", or "feeds" another when they are adjacent in primary_path or connected in logic_links. Never infer a predecessor/successor link from the date-sorted chronological list, because parallel branches are interleaved there.
    - Use only current_target_critical_path.critical_activities, critical_activity_groups, paths, and their is_critical/on_critical_trace/float_current_days fields to describe critical work. Do not add or remove activities based on date gaps.
    - Use path_method as the path-definition method. The critical path is extracted by treating TASK/TASKPRED as a DAG and tracing backward from the target through predecessors whose P6 total float is less than or equal to the current branch float within tolerance. Keep near-critical discussion for Section 5.
    - If current_target_critical_path.critical_trace_bridges or a logic link trace_bridge is present, explain it as a calendar-based trace bridge only. A bridged predecessor is upstream driver context, not a 0-float critical activity, unless its own is_critical flag is true.
    - If narrative_focus.current_active_critical_driver or current_target_critical_path.critical_status_focus.current_active_critical_driver is present, lead with it as the current active critical driver. Then describe the next not-started critical work. Do not say the critical chain starts with a future/not-started activity when an in-progress critical activity exists.
    - Use current_status exactly as provided. "in_progress" means active critical work; "not_started" means future/next critical work; "completed" means completed upstream context only.
-   - Always describe critical work chronologically from the earliest upstream physical work toward the final finish/milestone. Use the JSON sequence order in chronological_target_critical_sequence_0_days; do not reorder it from apparent date gaps.
+   - Describe critical work from the earliest upstream physical work toward the final finish/milestone by following the logical order in primary_critical_path_0_days (primary_path.activity_chain), not the date-sorted chronological list. When several critical activities run in parallel (different branches in alternate_tied_paths or different critical_activity_groups that converge later), describe them as parallel branches converging toward the target — do not chain them one-after-another.
    - In schedule language, "driving" means upstream predecessor work controlling downstream successor work. Do not state that finalization, commissioning, line painting, paving, off-bridge closeout, or milestone activities drive the path when they appear at the tail end. Say those activities are downstream/tail-end work driven by the upstream critical work.
-   - If upstream concrete/structural work feeds downstream finish/off-bridge work, describe it as one continuous sequence from upstream work into finalization. Do not split one chronological chain into separate "primary" and "tied" narratives unless the JSON explicitly separates them as different branches.
+   - If a single branch of upstream concrete/structural work feeds downstream finish/off-bridge work along the SAME primary_path chain, describe that branch as one continuous sequence into finalization. But when the JSON separates work into different branches (primary_path vs alternate_tied_paths, or distinct critical_activity_groups), keep them as separate parallel branches; do not merge two parallel branches into one linear "X then Y" sequence.
    - If narrative_focus.tied_branch_examples is present, describe those as parallel/tied predecessor branches feeding into the listed shared activity. Prefer each tied branch example's report_phrase when present. Do not say the active critical driver is followed by a tied branch; use "In parallel" or "A tied predecessor branch" language.
    - Lead with the major grouped areas represented by current_target_critical_path.critical_activity_groups. The primary_path is only an example branch and must not be described as the whole critical path when other critical groups are listed.
    - If current_target_critical_path.completed_upstream_summary is present, mention completed upstream work only as completed context when useful. Do not describe completed upstream work as current critical risk.
@@ -345,6 +346,8 @@ Required narrative structure:
    - Do not classify activities already included in the Section 4 critical trace as near-critical, even if their float is inside the near-critical threshold.
    - Focus on near-critical activities using near_critical_grouped. Near-critical activities are selected by Python from non-summary current-schedule activities using P6 total float greater than the critical threshold and less than or equal to settings.variance_threshold above that threshold, excluding activities already included in the Section 4 critical trace.
    - Summarize near-critical exposure by grouped area, location, phase, discipline, or work type.
+   - For each main near-critical area, NAME the key activities (from near_critical_grouped.groups[].representative_items[].task_name) and briefly say what the work is and its float. Do not write only a bare count like "6 activities in this area"; give a concrete picture (e.g. "removals and surface prep — sidewalk concrete removal, expansion joint removal and overhang bracket install — at 1-4 days float"). You may still group, but ground it in the actual activity names. Do not list every activity; pick the most representative.
+   - Use near_critical_grouped.driving_links (predecessor links among the near-critical activities, from_task_name -> to_task_name with relationship_type/lag_days) to describe how the near-critical work sequences and drives itself (e.g. "removal drives the repair, which drives forming"). Only state a driving relationship that appears in driving_links; do not infer one from dates or area grouping.
    - Preserve exact supported locations/levels/areas for each near-critical exposure. Avoid generic risk phrases when the grouped data identifies a specific work area.
    - Use eroding_risks to highlight where float is eroding faster than time is passing.
    - Do not discuss in-progress finish extensions here unless they also appear in near_critical_grouped or eroding_risks.
@@ -358,6 +361,8 @@ Required narrative structure:
    - Group the upcoming work by location, WBS area, phase, discipline, or work type. Do not list every activity.
    - Use group-level forecast_start_count, forecast_finish_count, not_started_count, and in_progress_count to describe the scale of upcoming work.
    - Use exact supported locations/levels/areas from the group fields and representative names. If the data shows upcoming work up to a specific level or within a specific room/zone, state that detail.
+   - For each main upcoming group, NAME the key activities (from upcoming_work.groups[].items[].task_name) and briefly describe the work, rather than only giving counts per area. Pick the most representative activities; do not list every one.
+   - Use upcoming_work.driving_links (predecessor links among upcoming activities, from_task_name -> to_task_name) to describe how the window's work sequences and drives itself where the data shows it. Only state a driving relationship present in driving_links.
    - Highlight schedule-sensitive upcoming groups using schedule_sensitive_upcoming_work.groups, but do not repeat the full critical path or near-critical risk discussion from Sections 4 and 5.
    - Keep the discussion practical and short: focus on the largest upcoming work groups and the most schedule-sensitive groups.
    - Do not write activity IDs and do not name every activity.
@@ -368,6 +373,64 @@ Required narrative structure:
    - Use current_active_critical_driver, active_critical_task_examples, top_critical_activity_groups, upstream_driver_task_examples, top_near_critical_groups, top_eroding_risks, and top_schedule_sensitive_groups as the main mitigation targets.
    - Recommendations may include crashing, re-sequencing, overlapping/fast-tracking, added supervision, procurement expediting, constraint removal, or trade coordination.
    - Keep recommendations specific to the described drivers, risks, trades, and locations/levels. Do not recommend unrelated actions.
+"""
+
+SYSTEM_DELAY_ANALYSIS_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a schedule delay analysis across multiple schedule updates for an owner/GC report.
+Your goal is to tell the story of how the target milestone's critical path and completion date evolved across the updates, using ONLY the provided JSON.
+
+Input shape:
+- settings: target_activity_id, variance_threshold (days), update_count.
+- target: the milestone task_name and baseline_finish_date (the contractual reference).
+- update_timeline: one entry per schedule update, in chronological order (oldest to newest). Each has data_date, target_finish_date, variance_vs_baseline_days, and critical_path_summary (active_driver, wbs_groups, driver_sequence with float_current_days in DAYS and status).
+- path_change_story: one entry per consecutive transition (previous update -> next update). Each has period_variance_days, path_changed, target_date_moved, path_changed_without_date_movement, shift_classification (evidence tags), drivers_added_to_current_path, drivers_removed_from_previous_path, previous_unique_upstream_status_counts, supported_shift_causes, and date_held_evidence.
+
+Style and output rules:
+- Write in clear bullet points under the required headings. Keep bullets short and concrete.
+- Do NOT write activity IDs. Use activity names and WBS/area/discipline grouping.
+- Treat all float values as DAYS. Criticality is precomputed in Python; use path_changed, status, and float exactly as provided.
+- Zero-Invention: use ONLY the numbers, names, dates, and tags in the JSON. Do not invent causes, intent, or impacts.
+- Forecast/actual dates are context only. Do not infer criticality, float, or driving status from date gaps.
+- If a value is missing (null/empty), state "Not available in the provided data." If a path changed but no supported cause exists in shift_classification or supported_shift_causes, say the specific cause is not determinable from the provided schedule data.
+
+Required structure:
+
+1) Overview & Net Movement
+   - State the target milestone name, its baseline_finish_date, and the current (latest update) target_finish_date with the latest variance_vs_baseline_days.
+   - State the number of updates analysed and how many transitions had path_changed = true.
+   - Give the overall arc in one or two bullets: did the completion date improve, slip, or hold across the series.
+
+2) Update-by-Update Timeline
+   - For each update in update_timeline (oldest to newest), start the bullet with data_date, target_finish_date, and variance_vs_baseline_days.
+   - Then BRIEFLY DESCRIBE THE WHOLE CRITICAL PATH from the earliest upstream driver through to the target milestone. Use critical_path_summary.driver_sequence (ordered upstream -> target) and critical_path_summary.path_wbs_sequence (the ordered WBS areas/phases the path flows through).
+   - Lead with critical_path_summary.active_driver (the current in-progress or next not-started critical activity), then walk the chain downstream through each major WBS area/phase, ending at the target. Describe it as a continuous flow, e.g. "from tender/award through bridge jacking and temporary shoring, into West Pier work and deck placement, then off-bridge sidewalk, paving and final line painting."
+   - You MAY group long runs of same-area activities into a phrase (e.g. "deck pour, cure and sidewalk/median forming") rather than naming each one, but you MUST cover the path end-to-end to the target. Do NOT stop at the first upstream driver or only name the active driver.
+   - Name the key driving activities and any milestones along the way. Treat float as DAYS from driver_sequence; do not infer criticality from dates.
+   - If an update has a critical_path_warning or target_warning, note that the target may not be logic-driven in that update (its path may collapse to just the target) and treat its path cautiously.
+
+3) Critical Path Changes — When and Why
+   - For each transition in path_change_story where path_changed = true, write a short paragraph/bullet group that states:
+     - WHEN: between which two updates (use from/to data dates).
+     - WHAT CHANGED: the new driving work (drivers_added_to_current_path, names + WBS area) and the work that dropped off the path (drivers_removed_from_previous_path).
+     - WHY: interpret shift_classification.tags strictly:
+        * "previous_path_progressed" -> the prior driving path advanced/completed, so a different chain now governs.
+        * "duration_constraint_or_calendar_change_on_current_path" -> a duration, constraint, or calendar change on the new path; cite the specific changed fields from supported_shift_causes.
+        * "logic_or_overlap_change_on_current_path" -> a relationship type or lag/overlap change; cite it.
+        * "new_activity_became_a_driver" -> a newly added activity is now on the driving path; name it.
+        * "cause_not_determinable_from_data" -> state the path changed but the specific cause is not determinable.
+     - DATE IMPACT: use period_variance_days. Negative means the completion pulled earlier (improved); positive means it slipped.
+     - RESULTING PATH: after explaining the change, briefly state where the new critical path now runs end-to-end, using the later update's critical_path_summary.driver_sequence / path_wbs_sequence (active driver through to the target). Do not stop at the newly added drivers.
+   - Do not describe shared downstream work as newly shifted; only the unique upstream driver portion changed.
+
+4) Path Shifted Without Date Movement
+   - For any transition where path_changed_without_date_movement = true, explain that the driving path changed but the target completion date did NOT move.
+   - Use date_held_evidence to give the supported mechanism: a different chain became governing at the same total length, typically because the previous path progressed (previous_path_progress status counts) while another chain absorbed the slack via the listed task_attribute_changes_on_current_path or relationship_changes_on_current_path (duration, overlap/lag, or calendar).
+   - If date_held_evidence has no supported attribute/logic changes, state that the path shifted but the offsetting mechanism is not determinable from the provided data. Do not invent one.
+   - If no transition has this flag, omit this section.
+
+5) Risk Outlook & Mitigation
+   - First, briefly describe the latest (current) update's critical path end-to-end, from active_driver through each major WBS area to the target, using the latest update's critical_path_summary.driver_sequence / path_wbs_sequence. State its least_float_current_days.
+   - Then, based on that path and the most recent transitions, give 2-3 practical, specific mitigation bullets aimed at the current active_driver and the areas/trades that most recently became critical.
+   - Recommendations may include re-sequencing, fast-tracking/overlap, procurement expediting, constraint/permit removal, added supervision, or trade coordination. Keep them tied to the named drivers and locations.
 """
 
 DOTENV_FILENAME = ".env"
@@ -519,10 +582,34 @@ def _get_api_key(api_key: str | None = None) -> str:
     return key
 
 
-def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = None, model: str = "gemini-2.5-flash") -> str:
+def configure_genai_client(api_key: str | None = None) -> None:
     """
-    Generate a schedule narrative using Gemini.
+    Configure the google-generativeai client (key resolution + Windows TLS trust + transport).
 
+    Shared by the report path (`_run_gemini`) and the Q&A function-calling agent so both honor the
+    same key sources and corporate-network workarounds.
+    """
+    key = _get_api_key(api_key)
+    if genai is None:  # pragma: no cover
+        raise RuntimeError(
+            "Missing dependency 'google-generativeai'. Install it with: pip install google-generativeai"
+        ) from _GENAI_IMPORT_ERROR
+    _configure_windows_tls_trust()
+    transport = _select_genai_transport()
+    try:
+        if transport:
+            genai.configure(api_key=key, transport=transport)
+        else:
+            genai.configure(api_key=key)
+    except TypeError:
+        genai.configure(api_key=key)
+
+
+def _run_gemini(system_instruction: str, user_content: str, *, model: str, api_key: str | None = None) -> str:
+    """
+    Shared Gemini call used by both the narrative and delay-analysis reports.
+
+    Handles key resolution, Windows TLS trust, transport selection, hard timeouts, and error mapping.
     Security note: API keys must NOT be hardcoded. Provide via GEMINI_API_KEY env var or api_key parameter.
     """
     key = _get_api_key(api_key)
@@ -548,13 +635,11 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
         genai.configure(api_key=key)
         transport = None
 
-    # Keep payload compact to reduce request size / latency.
-    user_content = json.dumps(data_digest, default=str)
     payload_bytes = len(user_content.encode("utf-8", errors="ignore"))
     logger.info("Gemini start model=%s transport=%s payload_bytes=%s", model, transport or "default", payload_bytes)
 
     # google-generativeai supports system_instruction on GenerativeModel.
-    model_obj = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_REPORT_GUIDELINES)
+    model_obj = genai.GenerativeModel(model_name=model, system_instruction=system_instruction)
     try:
         t_call = time.perf_counter()
         # Some environments ignore SDK-level timeouts (especially with gRPC/HTTP2).
@@ -613,6 +698,90 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
     return str(text).strip()
 
 
+def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = None, model: str = "gemini-2.5-flash") -> str:
+    """Generate a schedule narrative using Gemini."""
+    # Keep payload compact to reduce request size / latency.
+    user_content = json.dumps(data_digest, default=str)
+    return _run_gemini(SYSTEM_REPORT_GUIDELINES, user_content, model=model, api_key=api_key)
+
+
+SYSTEM_PROJECT_OVERVIEW_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a plain-language overview of a single construction schedule (one XER file) for an owner/GC reader who wants to understand the project at a glance. Use ONLY the provided JSON.
+
+Input shape:
+- project: name, data_date, schedule_start, schedule_finish, total_duration_days, activity_count, overall_percent_complete, status_breakdown (completed/in_progress/not_started).
+- wbs_scope_top_areas: the largest WBS areas with activity counts (this is the scope/phase breakdown).
+- milestones: key milestones with dates, kind (finish vs start_or_other), and status.
+- main_paths: the schedule's main backbones (longest driving paths), each with span_days, start/finish dates, percent_complete, is_current_critical_path, starts_constraint_driven, wbs_sequence (the ordered areas the path flows through), and activity_sequence (ordered activity names from upstream to the path end). These are derived from P6's computed dates and logic, not from summing durations.
+- data_quality_note: if present, a caution about stale/un-scheduled dates.
+
+Style:
+- Write in clear sections with short bullets. Plain construction language.
+- Treat any float as DAYS. Do not invent facts, dates, causes, or scope. If a value is missing, say "Not available in the provided data."
+- Do NOT write activity IDs.
+
+Required structure:
+
+1) What This Project Is
+   - State the project name, the overall schedule window (schedule_start to schedule_finish) and total_duration_days, the activity_count, and overall_percent_complete with the status_breakdown.
+   - Describe what kind of project it is and its main scope/phases using wbs_scope_top_areas (e.g. pre-construction, foundations, structure, envelope, interior fit-out, commissioning) and the milestone names. Keep it to what the WBS and milestones actually show.
+
+2) Schedule Status & Key Milestones
+   - Summarize how far along the project is (percent complete, what is completed vs in progress vs not started).
+   - List the key milestones from milestones (name + date), grouping start vs finish milestones; highlight the major completion milestone(s).
+
+3) Main Paths (Backbones)
+   - For each entry in main_paths, describe the path as a continuous flow through its wbs_sequence areas, naming a few key activities from activity_sequence (start, a mid point, and the end). State its span_days, percent_complete, and start/finish dates.
+   - Clearly identify the path where is_current_critical_path is true as the project's current driving/critical path.
+   - If starts_constraint_driven is true for a path, note that it begins at a constraint-driven activity.
+   - Do not merge separate paths into one sequence; describe each backbone on its own.
+
+4) Observations
+   - 2-4 neutral, supported observations: which areas carry the most work (from wbs_scope_top_areas), how the backbones relate (e.g. shared early work then splitting by stage/zone), and any data_quality_note. Do not speculate beyond the JSON.
+"""
+
+
+def generate_project_overview(
+    overview_digest: Mapping[str, Any],
+    *,
+    instruction: str | None = None,
+    api_key: str | None = None,
+    model: str = "gemini-2.5-flash",
+) -> str:
+    """Generate a single-schedule project overview report using Gemini."""
+    system_instruction = SYSTEM_PROJECT_OVERVIEW_GUIDELINES
+    if instruction and str(instruction).strip():
+        system_instruction = (
+            SYSTEM_PROJECT_OVERVIEW_GUIDELINES
+            + "\n\nAdditional user instruction for this run (follow it unless it conflicts with the no-invention rule):\n"
+            + str(instruction).strip()
+        )
+    user_content = json.dumps(overview_digest, default=str)
+    return _run_gemini(system_instruction, user_content, model=model, api_key=api_key)
+
+
+def generate_delay_report(
+    delay_digest: Mapping[str, Any],
+    *,
+    instruction: str | None = None,
+    api_key: str | None = None,
+    model: str = "gemini-2.5-flash",
+) -> str:
+    """
+    Generate a multi-update schedule delay-analysis report using Gemini.
+
+    The optional `instruction` is appended to the system guidelines as an extra focus for this run.
+    """
+    system_instruction = SYSTEM_DELAY_ANALYSIS_GUIDELINES
+    if instruction and str(instruction).strip():
+        system_instruction = (
+            SYSTEM_DELAY_ANALYSIS_GUIDELINES
+            + "\n\nAdditional user instruction for this run (follow it unless it conflicts with the Zero-Invention rule):\n"
+            + str(instruction).strip()
+        )
+    user_content = json.dumps(delay_digest, default=str)
+    return _run_gemini(system_instruction, user_content, model=model, api_key=api_key)
+
+
 def generate_narrative_via_proxy(
     data_digest: Mapping[str, Any],
     *,
@@ -652,6 +821,58 @@ def generate_narrative_via_proxy(
         raise RuntimeError(f"Proxy error {e.code}: {msg}") from e
     except urllib.error.URLError as e:
         logger.error("Proxy url_error total_s=%.3f err=%s", time.perf_counter() - t0, str(e))
+        raise RuntimeError(f"Could not reach proxy: {e}") from e
+
+    data = json.loads(raw)
+    text = data.get("text")
+    if not text:
+        raise RuntimeError(f"Proxy response missing 'text': {data}")
+    return str(text).strip()
+
+
+def generate_delay_report_via_proxy(
+    delay_digest: Mapping[str, Any],
+    *,
+    proxy_url: str,
+    user_token: str,
+    model: str,
+    instruction: str | None = None,
+    timeout_s: int = 120,
+) -> str:
+    """
+    Call the backend proxy to produce a delay-analysis report (proxy holds the Gemini key).
+    """
+    logger = _get_logger()
+    t0 = time.perf_counter()
+    url = proxy_url.strip().rstrip("/") + "/v1/delay"
+    token = user_token.strip()
+    if not token:
+        raise RuntimeError("Missing user token for narrative proxy.")
+
+    payload: dict[str, Any] = {"data_digest": delay_digest, "model": model}
+    if instruction and str(instruction).strip():
+        payload["instruction"] = str(instruction).strip()
+    body = json.dumps(payload, default=str).encode("utf-8")
+    logger.info("Proxy(delay) start model=%s body_bytes=%s url=%s", model, len(body), url)
+    req = urllib.request.Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        logger.info("Proxy(delay) ok model=%s total_s=%.3f", model, time.perf_counter() - t0)
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", errors="replace")
+        logger.error("Proxy(delay) http_error code=%s total_s=%.3f body=%s", e.code, time.perf_counter() - t0, msg)
+        raise RuntimeError(f"Proxy error {e.code}: {msg}") from e
+    except urllib.error.URLError as e:
+        logger.error("Proxy(delay) url_error total_s=%.3f err=%s", time.perf_counter() - t0, str(e))
         raise RuntimeError(f"Could not reach proxy: {e}") from e
 
     data = json.loads(raw)

@@ -14,6 +14,14 @@ from tkinter.scrolledtext import ScrolledText
 
 import xer_comparator as xc
 import narrative_engine as ne
+import delay_analyzer as da
+import schedule_investigator as si
+import schedule_qa as sqa
+
+
+# Delay analysis traces the critical path from P6 total float; this small tolerance only controls how
+# strictly the trace bridges calendar/constraint float gaps. It is not a user-facing near-critical setting.
+DELAY_FLOAT_TOLERANCE_DAYS = 1
 
 try:
     import scheduleanalytics_build as _build  # type: ignore
@@ -70,7 +78,17 @@ class ScheduleAnalysisApp(tk.Tk):
         self.near_critical_threshold = tk.StringVar(value="8")
         self.look_ahead_horizon = tk.StringVar(value="30")
 
+        # Delay Analysis tab inputs (baseline + dynamic update slots).
+        self.delay_baseline_path = tk.StringVar(value="")
+        self.delay_target_activity_id = tk.StringVar(value="A3000")
+
+        # Project Overview tab (single XER).
+        self.overview_path = tk.StringVar(value="")
+
         self._last_compare_result: dict[str, Any] | None = None
+        self._last_delay_result: dict[str, Any] | None = None
+        self._last_overview_result: dict[str, Any] | None = None
+        self._loaded_overview_snapshot: Any = None
 
         cfg = _load_config()
         self.ai_model = tk.StringVar(value=str(cfg.get("ai_model") or "gemini-3-flash-preview"))
@@ -102,7 +120,33 @@ class ScheduleAnalysisApp(tk.Tk):
         self.rowconfigure(0, weight=1)
 
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        notebook = ttk.Notebook(root)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        narrative_tab = ttk.Frame(notebook, padding=10)
+        delay_tab = ttk.Frame(notebook, padding=10)
+        overview_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(narrative_tab, text="Narrative Generator")
+        notebook.add(delay_tab, text="Delay Analysis")
+        notebook.add(overview_tab, text="Project Overview")
+
+        # Shared AI / connection settings live below the notebook so both tabs use them.
+        ai = ttk.LabelFrame(root, text="AI / Connection (shared)", padding=10)
+        ai.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ai.columnconfigure(1, weight=1)
+        self._model_row(ai, 0, "AI Logic Engine:", self.ai_model)
+        self._settings_row(ai, 1, "Narrative Proxy URL:", self.proxy_url)
+        self._secret_row(ai, 2, "User Token:", self.user_token)
+
+        self._build_narrative_tab(narrative_tab)
+        self._build_delay_tab(delay_tab)
+        self._build_overview_tab(overview_tab)
+
+    def _build_narrative_tab(self, root: ttk.Frame) -> None:
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(3, weight=1)  # Results pane expands; button row stays compact above it.
 
         files = ttk.LabelFrame(root, text="File Selection", padding=10)
         files.grid(row=0, column=0, sticky="ew")
@@ -118,9 +162,6 @@ class ScheduleAnalysisApp(tk.Tk):
         self._settings_row(settings, 0, "Target Activity ID:", self.target_activity_id)
         self._settings_row(settings, 1, "Near-Critical Threshold (days):", self.near_critical_threshold)
         self._settings_row(settings, 2, "Look-Ahead Horizon (days):", self.look_ahead_horizon)
-        self._model_row(settings, 3, "AI Logic Engine:", self.ai_model)
-        self._settings_row(settings, 4, "Narrative Proxy URL:", self.proxy_url)
-        self._secret_row(settings, 5, "User Token:", self.user_token)
 
         run_row = ttk.Frame(root)
         run_row.grid(row=2, column=0, sticky="ew")
@@ -146,15 +187,97 @@ class ScheduleAnalysisApp(tk.Tk):
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
 
-        self.results = ScrolledText(results_frame, wrap="none", height=20)
+        self.results = ScrolledText(results_frame, wrap="none", height=16)
         self.results.grid(row=0, column=0, sticky="nsew")
 
-        self._write_results(
-            {
-                "status": "ready",
-                "hint": "Select three XER files, set inputs, then click Run.",
-            }
+        self._write_to(self.results, {"status": "ready", "hint": "Select three XER files, set inputs, then click Run."})
+
+    def _build_delay_tab(self, root: ttk.Frame) -> None:
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(4, weight=1)  # Results pane (row 4) expands; button row (row 3) stays compact above it.
+
+        files = ttk.LabelFrame(root, text="File Selection", padding=10)
+        files.grid(row=0, column=0, sticky="ew")
+        files.columnconfigure(1, weight=1)
+
+        self._file_row(files, 0, "Baseline XER:", self.delay_baseline_path)
+
+        ttk.Label(files, text="Updates (chronological; auto-sorted by data date):").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(8, 2)
         )
+        self.delay_updates_frame = ttk.Frame(files)
+        self.delay_updates_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.delay_updates_frame.columnconfigure(1, weight=1)
+        self.delay_update_paths = []
+        # Start with two update slots.
+        self._add_delay_update_row()
+        self._add_delay_update_row()
+
+        ttk.Button(files, text="+ Add Update", command=self._add_delay_update_row).grid(
+            row=3, column=0, sticky="w", pady=(6, 0)
+        )
+
+        settings = ttk.LabelFrame(root, text="Settings", padding=10)
+        settings.grid(row=1, column=0, sticky="ew", pady=(10, 10))
+        settings.columnconfigure(1, weight=1)
+        self._settings_row(settings, 0, "Target Activity ID:", self.delay_target_activity_id)
+
+        instr = ttk.LabelFrame(root, text="Report Instruction (optional)", padding=10)
+        instr.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        instr.columnconfigure(0, weight=1)
+        self.delay_instruction = ScrolledText(instr, wrap="word", height=3)
+        self.delay_instruction.grid(row=0, column=0, sticky="ew")
+
+        run_row = ttk.Frame(root)
+        run_row.grid(row=3, column=0, sticky="ew")
+        run_row.columnconfigure(0, weight=1)
+        self.delay_status_var = tk.StringVar(value="Ready.")
+        ttk.Label(run_row, textvariable=self.delay_status_var).grid(row=0, column=0, sticky="w")
+        self.delay_run_button = ttk.Button(run_row, text="Run Analysis", command=self._run_delay_analysis)
+        self.delay_run_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.delay_report_button = ttk.Button(run_row, text="Generate Delay Report", command=self._generate_delay_report)
+        self.delay_report_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        results_frame = ttk.LabelFrame(root, text="Results", padding=10)
+        results_frame.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        results_frame.columnconfigure(0, weight=1)
+        results_frame.rowconfigure(0, weight=1)
+        self.delay_results = ScrolledText(results_frame, wrap="none", height=14)
+        self.delay_results.grid(row=0, column=0, sticky="nsew")
+        self._write_to(
+            self.delay_results,
+            {"status": "ready", "hint": "Select a baseline and at least two updates, set the target, then Run Analysis."},
+        )
+
+    def _add_delay_update_row(self) -> None:
+        var = tk.StringVar(value="")
+        self.delay_update_paths.append(var)
+        self._rebuild_delay_update_rows()
+
+    def _remove_delay_update_row(self, var: tk.StringVar) -> None:
+        # Keep at least two update slots.
+        if len(self.delay_update_paths) <= 2:
+            return
+        self.delay_update_paths = [v for v in self.delay_update_paths if v is not var]
+        self._rebuild_delay_update_rows()
+
+    def _rebuild_delay_update_rows(self) -> None:
+        for child in self.delay_updates_frame.winfo_children():
+            child.destroy()
+        for i, var in enumerate(self.delay_update_paths):
+            ttk.Label(self.delay_updates_frame, text=f"Update {i + 1} XER:").grid(
+                row=i, column=0, sticky="w", padx=(0, 8), pady=3
+            )
+            ttk.Entry(self.delay_updates_frame, textvariable=var).grid(row=i, column=1, sticky="ew", pady=3)
+            ttk.Button(self.delay_updates_frame, text="Browse", command=lambda v=var: self._browse_xer(v)).grid(
+                row=i, column=2, sticky="e", padx=(8, 0), pady=3
+            )
+            remove_btn = ttk.Button(
+                self.delay_updates_frame, text="✕", width=3, command=lambda v=var: self._remove_delay_update_row(v)
+            )
+            remove_btn.grid(row=i, column=3, sticky="e", padx=(6, 0), pady=3)
+            if len(self.delay_update_paths) <= 2:
+                remove_btn.configure(state="disabled")
 
     def _file_row(self, parent: ttk.Frame, row: int, label: str, var: tk.StringVar) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -261,6 +384,9 @@ class ScheduleAnalysisApp(tk.Tk):
             self._last_compare_result = result
             self._write_results(result)
             self.status_var.set("Analysis complete.")
+            target_warning = (result.get("critical_path_to_target", {}) or {}).get("target_warning")
+            if target_warning:
+                messagebox.showwarning("Target Activity Check", target_warning)
         except Exception as e:
             messagebox.showerror("Run Error", str(e))
             self.status_var.set("Error.")
@@ -269,16 +395,19 @@ class ScheduleAnalysisApp(tk.Tk):
             self.run_button.configure(state="normal")
             self.narrative_button.configure(state="normal")
 
-    def _write_results(self, obj: Any) -> None:
+    def _write_to(self, widget: ScrolledText, obj: Any) -> None:
         try:
             text = json.dumps(obj, indent=2, default=str)
         except Exception:
             text = str(obj)
 
-        self.results.configure(state="normal")
-        self.results.delete("1.0", "end")
-        self.results.insert("1.0", text)
-        self.results.configure(state="disabled")
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def _write_results(self, obj: Any) -> None:
+        self._write_to(self.results, obj)
 
     def _check_network(self) -> None:
         self.status_var.set("Checking network...")
@@ -520,6 +649,397 @@ class ScheduleAnalysisApp(tk.Tk):
         text = ScrolledText(win, wrap="word")
         text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         text.insert("1.0", narrative)
+        text.configure(state="disabled")
+
+    # ---------------- Delay Analysis tab ----------------
+
+    def _validate_delay_inputs(self) -> dict[str, Any]:
+        baseline = self.delay_baseline_path.get().strip()
+        if not baseline or not Path(baseline).exists():
+            raise ValueError("Baseline XER path is missing or invalid.")
+
+        updates: list[str] = []
+        for var in self.delay_update_paths:
+            p = var.get().strip()
+            if not p:
+                continue
+            if not Path(p).exists():
+                raise ValueError(f"Update XER path does not exist:\n{p}")
+            updates.append(p)
+        if len(updates) < 2:
+            raise ValueError("Provide at least two update XER files for delay analysis.")
+
+        target = self.delay_target_activity_id.get().strip()
+        if not target:
+            raise ValueError("Target Activity ID is required.")
+
+        return {"baseline": baseline, "updates": updates, "target": target}
+
+    def _run_delay_analysis(self) -> None:
+        try:
+            inputs = self._validate_delay_inputs()
+        except Exception as e:
+            messagebox.showerror("Input Error", str(e))
+            return
+
+        self._last_delay_result = None
+        self.delay_status_var.set("Running delay analysis...")
+        self.delay_run_button.configure(state="disabled")
+        self.delay_report_button.configure(state="disabled")
+        self.configure(cursor="watch")
+        self.update_idletasks()
+
+        try:
+            result = da.analyze_delays_from_paths(
+                inputs["baseline"],
+                inputs["updates"],
+                target_activity_id=inputs["target"],
+                variance_threshold=DELAY_FLOAT_TOLERANCE_DAYS,
+            )
+            self._last_delay_result = result
+            self._write_to(self.delay_results, result)
+            n_changed = sum(1 for t in result.get("transitions", []) if t.get("path_changed"))
+            self.delay_status_var.set(
+                f"Delay analysis complete. {result['settings']['update_count']} updates, {n_changed} path change(s)."
+            )
+            validation = result.get("target_validation", {}) or {}
+            warnings = validation.get("warnings") or []
+            if warnings:
+                lead = (
+                    "The target has no driving logic in one or more updates, so the delay story may be meaningless.\n\n"
+                    if not validation.get("has_driving_logic_all_updates", True)
+                    else ""
+                )
+                messagebox.showwarning("Target Activity Check", lead + "\n\n".join(warnings))
+        except Exception as e:
+            messagebox.showerror("Run Error", str(e))
+            self.delay_status_var.set("Error.")
+        finally:
+            self.configure(cursor="")
+            self.delay_run_button.configure(state="normal")
+            self.delay_report_button.configure(state="normal")
+
+    def _generate_delay_report(self) -> None:
+        if not self._last_delay_result:
+            messagebox.showerror("Generate Delay Report", "Run the delay analysis first, then generate the report.")
+            return
+
+        instruction = self.delay_instruction.get("1.0", "end").strip()
+        digest = da.build_delay_digest(self._last_delay_result, instruction=instruction or None)
+
+        proxy_url = self.proxy_url.get().strip()
+        token = self.user_token.get().strip()
+        if bool(proxy_url) ^ bool(token):
+            messagebox.showerror(
+                "Generate Delay Report",
+                "To use the Narrative Proxy you must provide BOTH:\n"
+                "  - Narrative Proxy URL\n"
+                "  - User Token\n\n"
+                "Or clear both fields to use direct Gemini (developer/test mode).",
+            )
+            return
+        try:
+            cfg = _load_config()
+            cfg.update(
+                {
+                    "proxy_url": proxy_url,
+                    "user_token": token,
+                    "ai_model": (self.ai_model.get().strip() or "gemini-3-flash-preview"),
+                }
+            )
+            _save_config(cfg)
+        except Exception:
+            pass
+
+        self.delay_status_var.set("Generating delay report...")
+        self.delay_report_button.configure(state="disabled")
+        self.delay_run_button.configure(state="disabled")
+        t0 = time.perf_counter()
+
+        def worker() -> None:
+            try:
+                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                if proxy_url and token:
+                    report = ne.generate_delay_report_via_proxy(
+                        digest,
+                        proxy_url=proxy_url,
+                        user_token=token,
+                        model=model,
+                        instruction=instruction or None,
+                    )
+                else:
+                    report = ne.generate_delay_report(digest, instruction=instruction or None, model=model)
+            except Exception as exc:
+                msg = str(exc)
+                elapsed = time.perf_counter() - t0
+                self.after(0, lambda m=msg, s=elapsed: self._on_delay_error(m, elapsed_s=s))
+                return
+            elapsed = time.perf_counter() - t0
+            self.after(0, lambda s=elapsed: self._show_delay_window(report, elapsed_s=s))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_delay_error(self, msg: str, *, elapsed_s: float | None = None) -> None:
+        self.delay_status_var.set("Error." if elapsed_s is None else f"Error after {elapsed_s:.1f}s.")
+        self.delay_report_button.configure(state="normal")
+        self.delay_run_button.configure(state="normal")
+        messagebox.showerror("Delay Report Error", msg)
+
+    def _show_delay_window(self, report: str, *, elapsed_s: float | None = None) -> None:
+        self.delay_status_var.set("Report ready." if elapsed_s is None else f"Report ready ({elapsed_s:.1f}s).")
+        self.delay_report_button.configure(state="normal")
+        self.delay_run_button.configure(state="normal")
+
+        win = tk.Toplevel(self)
+        win.title("Delay Analysis Report")
+        win.minsize(900, 600)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+
+        btns = ttk.Frame(win, padding=10)
+        btns.grid(row=0, column=0, sticky="ew")
+        btns.columnconfigure(0, weight=1)
+
+        def copy_to_clipboard() -> None:
+            win.clipboard_clear()
+            win.clipboard_append(report)
+            win.update_idletasks()
+
+        def save_document() -> None:
+            path = filedialog.asksaveasfilename(
+                title="Save Delay Analysis Report",
+                defaultextension=".txt",
+                filetypes=[("Text Document", "*.txt"), ("Markdown", "*.md"), ("All Files", "*.*")],
+            )
+            if not path:
+                return
+            Path(path).write_text(report, encoding="utf-8")
+
+        ttk.Button(btns, text="Copy to Clipboard", command=copy_to_clipboard).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Button(btns, text="Save as Document", command=save_document).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        text = ScrolledText(win, wrap="word")
+        text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        text.insert("1.0", report)
+        text.configure(state="disabled")
+
+    # ---------------- Project Overview tab ----------------
+
+    def _build_overview_tab(self, root: ttk.Frame) -> None:
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(3, weight=1)  # Results pane expands.
+        root.rowconfigure(4, weight=1)  # Q&A pane expands.
+
+        files = ttk.LabelFrame(root, text="File Selection", padding=10)
+        files.grid(row=0, column=0, sticky="ew")
+        files.columnconfigure(1, weight=1)
+        self._file_row(files, 0, "XER File:", self.overview_path)
+
+        instr = ttk.LabelFrame(root, text="Report Instruction (optional)", padding=10)
+        instr.grid(row=1, column=0, sticky="ew", pady=(10, 10))
+        instr.columnconfigure(0, weight=1)
+        self.overview_instruction = ScrolledText(instr, wrap="word", height=3)
+        self.overview_instruction.grid(row=0, column=0, sticky="ew")
+
+        run_row = ttk.Frame(root)
+        run_row.grid(row=2, column=0, sticky="ew")
+        run_row.columnconfigure(0, weight=1)
+        self.overview_status_var = tk.StringVar(value="Ready.")
+        ttk.Label(run_row, textvariable=self.overview_status_var).grid(row=0, column=0, sticky="w")
+        self.overview_run_button = ttk.Button(run_row, text="Analyze", command=self._run_overview_analysis)
+        self.overview_run_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.overview_report_button = ttk.Button(run_row, text="Generate Overview", command=self._generate_overview)
+        self.overview_report_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        results_frame = ttk.LabelFrame(root, text="Results", padding=10)
+        results_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        results_frame.columnconfigure(0, weight=1)
+        results_frame.rowconfigure(0, weight=1)
+        self.overview_results = ScrolledText(results_frame, wrap="none", height=10)
+        self.overview_results.grid(row=0, column=0, sticky="nsew")
+        self._write_to(
+            self.overview_results,
+            {"status": "ready", "hint": "Select a single XER file, then click Analyze to see the project facts and main paths."},
+        )
+
+        qa = ttk.LabelFrame(root, text="Ask about this schedule (direct Gemini key required)", padding=10)
+        qa.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        qa.columnconfigure(0, weight=1)
+        qa.rowconfigure(0, weight=1)
+        self.overview_qa_transcript = ScrolledText(qa, wrap="word", height=8, state="disabled")
+        self.overview_qa_transcript.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.overview_qa_question = tk.StringVar(value="")
+        entry = ttk.Entry(qa, textvariable=self.overview_qa_question)
+        entry.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        entry.bind("<Return>", lambda _e: self._ask_overview_question())
+        self.overview_ask_button = ttk.Button(qa, text="Ask", command=self._ask_overview_question)
+        self.overview_ask_button.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(8, 0))
+
+    def _run_overview_analysis(self) -> None:
+        path = self.overview_path.get().strip()
+        if not path or not Path(path).exists():
+            messagebox.showerror("Input Error", "XER file path is missing or invalid.")
+            return
+
+        self._last_overview_result = None
+        self._loaded_overview_snapshot = None
+        self.overview_status_var.set("Analyzing schedule...")
+        self.overview_run_button.configure(state="disabled")
+        self.overview_report_button.configure(state="disabled")
+        self.configure(cursor="watch")
+        self.update_idletasks()
+
+        try:
+            snap = xc.snapshot_from_xer_path("schedule", path)
+            overview = si.project_overview(snap)
+            backbones = si.longest_backbones(snap)
+            self._loaded_overview_snapshot = snap
+            self._last_overview_result = {"overview": overview, "backbones": backbones}
+            self._write_to(self.overview_results, self._last_overview_result)
+            self.overview_status_var.set(
+                f"Analysis complete. {overview.get('activity_count')} activities, "
+                f"{backbones.get('backbone_count')} main paths."
+            )
+        except Exception as e:
+            messagebox.showerror("Run Error", str(e))
+            self.overview_status_var.set("Error.")
+        finally:
+            self.configure(cursor="")
+            self.overview_run_button.configure(state="normal")
+            self.overview_report_button.configure(state="normal")
+
+    def _generate_overview(self) -> None:
+        if not self._last_overview_result:
+            messagebox.showerror("Generate Overview", "Analyze a schedule first, then generate the overview.")
+            return
+
+        instruction = self.overview_instruction.get("1.0", "end").strip()
+        digest = si.build_investigation_digest(
+            self._last_overview_result["overview"],
+            self._last_overview_result["backbones"],
+            instruction=instruction or None,
+        )
+
+        proxy_url = self.proxy_url.get().strip()
+        token = self.user_token.get().strip()
+        if bool(proxy_url) ^ bool(token):
+            messagebox.showerror(
+                "Generate Overview",
+                "To use the Narrative Proxy you must provide BOTH the Proxy URL and User Token, "
+                "or clear both to use direct Gemini.",
+            )
+            return
+
+        self.overview_status_var.set("Generating overview...")
+        self.overview_report_button.configure(state="disabled")
+        self.overview_run_button.configure(state="disabled")
+        t0 = time.perf_counter()
+
+        def worker() -> None:
+            try:
+                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                if proxy_url and token:
+                    report = ne.generate_narrative_via_proxy(digest, proxy_url=proxy_url, user_token=token, model=model)
+                else:
+                    report = ne.generate_project_overview(digest, instruction=instruction or None, model=model)
+            except Exception as exc:
+                msg = str(exc)
+                elapsed = time.perf_counter() - t0
+                self.after(0, lambda m=msg, s=elapsed: self._on_overview_error(m, elapsed_s=s))
+                return
+            elapsed = time.perf_counter() - t0
+            self.after(0, lambda s=elapsed: self._show_overview_window(report, elapsed_s=s))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _append_qa(self, role: str, text: str) -> None:
+        self.overview_qa_transcript.configure(state="normal")
+        self.overview_qa_transcript.insert("end", f"{role}: {text}\n\n")
+        self.overview_qa_transcript.see("end")
+        self.overview_qa_transcript.configure(state="disabled")
+
+    def _ask_overview_question(self) -> None:
+        if self._loaded_overview_snapshot is None:
+            messagebox.showerror("Ask", "Analyze a schedule first, then ask questions about it.")
+            return
+        question = self.overview_qa_question.get().strip()
+        if not question:
+            return
+        # Q&A runs the tool-calling agent locally, so it needs a direct Gemini key (not the proxy).
+        proxy_url = self.proxy_url.get().strip()
+        token = self.user_token.get().strip()
+        if proxy_url and token and not ne.find_api_key():
+            messagebox.showinfo(
+                "Ask",
+                "Q&A runs a local tool-calling agent and needs a direct Gemini key "
+                "(GEMINI_API_KEY in environment or a .env file). The Narrative Proxy is not used for Q&A in this version.",
+            )
+            return
+
+        self.overview_qa_question.set("")
+        self._append_qa("You", question)
+        self.overview_ask_button.configure(state="disabled")
+        self.overview_status_var.set("Thinking...")
+        snapshot = self._loaded_overview_snapshot
+        model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+
+        def worker() -> None:
+            try:
+                answer = sqa.answer_question(snapshot, question, model=model)
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: self._finish_qa(f"[Error] {m}"))
+                return
+            self.after(0, lambda a=answer: self._finish_qa(a))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_qa(self, answer: str) -> None:
+        self._append_qa("Assistant", answer)
+        self.overview_ask_button.configure(state="normal")
+        self.overview_status_var.set("Ready.")
+
+    def _on_overview_error(self, msg: str, *, elapsed_s: float | None = None) -> None:
+        self.overview_status_var.set("Error." if elapsed_s is None else f"Error after {elapsed_s:.1f}s.")
+        self.overview_report_button.configure(state="normal")
+        self.overview_run_button.configure(state="normal")
+        messagebox.showerror("Overview Error", msg)
+
+    def _show_overview_window(self, report: str, *, elapsed_s: float | None = None) -> None:
+        self.overview_status_var.set("Overview ready." if elapsed_s is None else f"Overview ready ({elapsed_s:.1f}s).")
+        self.overview_report_button.configure(state="normal")
+        self.overview_run_button.configure(state="normal")
+
+        win = tk.Toplevel(self)
+        win.title("Project Overview Report")
+        win.minsize(900, 600)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+
+        btns = ttk.Frame(win, padding=10)
+        btns.grid(row=0, column=0, sticky="ew")
+        btns.columnconfigure(0, weight=1)
+
+        def copy_to_clipboard() -> None:
+            win.clipboard_clear()
+            win.clipboard_append(report)
+            win.update_idletasks()
+
+        def save_document() -> None:
+            p = filedialog.asksaveasfilename(
+                title="Save Project Overview",
+                defaultextension=".txt",
+                filetypes=[("Text Document", "*.txt"), ("Markdown", "*.md"), ("All Files", "*.*")],
+            )
+            if p:
+                Path(p).write_text(report, encoding="utf-8")
+
+        ttk.Button(btns, text="Copy to Clipboard", command=copy_to_clipboard).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Button(btns, text="Save as Document", command=save_document).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        text = ScrolledText(win, wrap="word")
+        text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        text.insert("1.0", report)
         text.configure(state="disabled")
 
 
