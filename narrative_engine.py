@@ -39,6 +39,27 @@ LOG_NAME = "schedule_analytics"
 _RECENT_LOG_LINES: deque[str] = deque(maxlen=400)
 _WINDOWS_TLS_CONFIGURED = False
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_OPTIONS = [
+    "gemini-3.5-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+]
+GEMINI_MODEL_ALIASES = {
+    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview": "gemini-3.5-flash",
+    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
+}
+
+
+def normalize_gemini_model(model: str | None) -> str:
+    requested = str(model or "").strip()
+    if not requested:
+        return DEFAULT_GEMINI_MODEL
+    return GEMINI_MODEL_ALIASES.get(requested, requested)
+
 
 def _configure_windows_tls_trust() -> None:
     """
@@ -612,6 +633,7 @@ def _run_gemini(system_instruction: str, user_content: str, *, model: str, api_k
     Handles key resolution, Windows TLS trust, transport selection, hard timeouts, and error mapping.
     Security note: API keys must NOT be hardcoded. Provide via GEMINI_API_KEY env var or api_key parameter.
     """
+    model = normalize_gemini_model(model)
     key = _get_api_key(api_key)
 
     if genai is None:  # pragma: no cover
@@ -679,11 +701,11 @@ def _run_gemini(system_instruction: str, user_content: str, *, model: str, api_k
         if "429" in msg or "quota" in msg.lower():
             raise RuntimeError(
                 "Gemini quota/rate-limit hit (HTTP 429). Try again later, or switch to a lower-tier model "
-                "like gemini-2.5-flash, or reduce usage."
+                "like gemini-3.1-flash-lite, or reduce usage."
             ) from e
         if "timed out" in msg.lower() or "timeout" in msg.lower():
             raise RuntimeError(
-                "Gemini request timed out. Check your internet/firewall and try gemini-2.5-flash. "
+                f"Gemini request timed out. Check your internet/firewall and try {DEFAULT_GEMINI_MODEL}. "
                 "If you are on a corporate network, the Gemini endpoint may be blocked."
             ) from e
         raise
@@ -698,7 +720,7 @@ def _run_gemini(system_instruction: str, user_content: str, *, model: str, api_k
     return str(text).strip()
 
 
-def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = None, model: str = "gemini-2.5-flash") -> str:
+def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = None, model: str = DEFAULT_GEMINI_MODEL) -> str:
     """Generate a schedule narrative using Gemini."""
     # Keep payload compact to reduce request size / latency.
     user_content = json.dumps(data_digest, default=str)
@@ -740,12 +762,68 @@ Required structure:
 """
 
 
+SYSTEM_HANDOVER_BRIEFING_GUIDELINES = """You are a Senior Project Planner at EllisDon. A scheduler is taking over this project and needs a briefing from the schedule. You are given the WHOLE schedule (one XER), so read it and explain the project the way you would brief the incoming scheduler. Use ONLY the provided JSON.
+
+Input shape:
+- project_facts: name, data_date, schedule_start, schedule_finish, total_duration_days, activity_count, overall_percent_complete, status_breakdown, wbs_scope_top_areas, milestones.
+- current_critical_path: the code-computed current driving/critical chain (ordered activity names with status and finish). Trust this for "what is driving the project."
+- all_activities: EVERY activity, each with name, wbs, status, start, finish, total_float_days (DAYS), milestone.
+- relationships: predecessor -> successor links as [predecessor_name, relationship_type, successor_name, lag_days].
+
+Grounding rules (important):
+- Treat total_float_days as authoritative. An activity at ~0 days total float is critical; near 0 is near-critical. Do NOT infer float, slack, or criticality from dates or gaps.
+- For "main drivers / critical path", lead with current_critical_path; you may corroborate with activities at ~0 float and the relationships, but do not invent a different critical path.
+- Use real activity names and dates from the data. Do not invent activities, dates, causes, or scope. If something is not in the data, say so. No activity IDs.
+- Group by WBS area / phase / discipline; you do not need to list every activity.
+
+Write the briefing with these sections:
+
+1) Project at a Glance
+   - What this project is (type, scope, location if evident from the name/WBS), its schedule window (schedule_start to schedule_finish), total duration, and activity count.
+
+2) Where It Stands Now
+   - The data date and overall_percent_complete. Summarize what is completed, what is in progress, and what remains (use status_breakdown and the activities). Call out the main areas of recent/active work.
+
+3) Key Dates & Milestones
+   - The major start and finish milestones with dates from project_facts.milestones; highlight the contractual/overall completion milestone(s).
+
+4) What Is Driving the Project (Critical & Near-Critical)
+   - Describe the current driving/critical path from current_critical_path as a continuous flow through its WBS areas, naming the key activities and the current active driver.
+   - Note the main near-critical exposure (activities at low but non-zero total_float_days) by area.
+
+5) Risks, Constraints & Things to Watch
+   - Point out anything a new scheduler should know that is supported by the data: constraint-driven starts, long-lead/procurement chains, big remaining scope concentrations (from wbs_scope_top_areas), permits/work-restriction windows, or milestones with little float. Only what the data supports.
+
+6) Where to Dig In
+   - 2-3 concrete suggestions of what the incoming scheduler should review first, tied to the drivers and risks above.
+"""
+
+
+def generate_handover_briefing(
+    payload: Mapping[str, Any],
+    *,
+    instruction: str | None = None,
+    api_key: str | None = None,
+    model: str = DEFAULT_GEMINI_MODEL,
+) -> str:
+    """Generate a full-schedule handover briefing (sends the whole parsed schedule) using Gemini."""
+    system_instruction = SYSTEM_HANDOVER_BRIEFING_GUIDELINES
+    if instruction and str(instruction).strip():
+        system_instruction = (
+            SYSTEM_HANDOVER_BRIEFING_GUIDELINES
+            + "\n\nAdditional user instruction for this run (follow it unless it conflicts with the no-invention rule):\n"
+            + str(instruction).strip()
+        )
+    user_content = json.dumps(payload, default=str)
+    return _run_gemini(system_instruction, user_content, model=model, api_key=api_key)
+
+
 def generate_project_overview(
     overview_digest: Mapping[str, Any],
     *,
     instruction: str | None = None,
     api_key: str | None = None,
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_GEMINI_MODEL,
 ) -> str:
     """Generate a single-schedule project overview report using Gemini."""
     system_instruction = SYSTEM_PROJECT_OVERVIEW_GUIDELINES
@@ -764,7 +842,7 @@ def generate_delay_report(
     *,
     instruction: str | None = None,
     api_key: str | None = None,
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_GEMINI_MODEL,
 ) -> str:
     """
     Generate a multi-update schedule delay-analysis report using Gemini.
@@ -793,6 +871,7 @@ def generate_narrative_via_proxy(
     """
     Call a backend proxy that holds the Gemini API key, authenticated with a per-user token.
     """
+    model = normalize_gemini_model(model)
     logger = _get_logger()
     t0 = time.perf_counter()
     url = proxy_url.strip().rstrip("/") + "/v1/narrative"
@@ -842,6 +921,7 @@ def generate_delay_report_via_proxy(
     """
     Call the backend proxy to produce a delay-analysis report (proxy holds the Gemini key).
     """
+    model = normalize_gemini_model(model)
     logger = _get_logger()
     t0 = time.perf_counter()
     url = proxy_url.strip().rstrip("/") + "/v1/delay"

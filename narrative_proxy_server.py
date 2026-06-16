@@ -83,10 +83,10 @@ def generate(
     if not isinstance(data_digest, dict):
         raise HTTPException(status_code=400, detail="'data_digest' must be a JSON object.")
 
-    model = payload.get("model") or "gemini-2.5-flash"
+    model = ne.normalize_gemini_model(str(payload.get("model") or ne.DEFAULT_GEMINI_MODEL))
 
     try:
-        text = ne.generate_narrative(data_digest, model=str(model))
+        text = ne.generate_narrative(data_digest, model=model)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -107,11 +107,11 @@ def generate_delay(
     if not isinstance(data_digest, dict):
         raise HTTPException(status_code=400, detail="'data_digest' must be a JSON object.")
 
-    model = payload.get("model") or "gemini-2.5-flash"
+    model = ne.normalize_gemini_model(str(payload.get("model") or ne.DEFAULT_GEMINI_MODEL))
     instruction = payload.get("instruction")
 
     try:
-        text = ne.generate_delay_report(data_digest, instruction=instruction, model=str(model))
+        text = ne.generate_delay_report(data_digest, instruction=instruction, model=model)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -142,4 +142,3 @@ def _main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main())
-

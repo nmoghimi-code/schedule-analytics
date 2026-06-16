@@ -9,7 +9,7 @@ from typing import Any
 import platform
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 import xer_comparator as xc
@@ -22,6 +22,10 @@ import schedule_qa as sqa
 # Delay analysis traces the critical path from P6 total float; this small tolerance only controls how
 # strictly the trace bridges calendar/constraint float gaps. It is not a user-facing near-critical setting.
 DELAY_FLOAT_TOLERANCE_DAYS = 1
+
+# Soft access gate for the Project Overview tab. NOTE: a hardcoded password is a deterrent only — it can
+# be extracted from the source/EXE. Do not treat it as real security.
+OVERVIEW_TAB_PASSWORD = "20091396"
 
 try:
     import scheduleanalytics_build as _build  # type: ignore
@@ -68,7 +72,7 @@ class ScheduleAnalysisApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"Schedule Analysis Tool (XER) — {_build_label()}")
-        self.minsize(900, 650)
+        self.minsize(900, 780)
 
         self.baseline_path = tk.StringVar(value="")
         self.last_path = tk.StringVar(value="")
@@ -90,8 +94,12 @@ class ScheduleAnalysisApp(tk.Tk):
         self._last_overview_result: dict[str, Any] | None = None
         self._loaded_overview_snapshot: Any = None
 
+        # Project Overview tab is gated behind a soft password until unlocked this session.
+        self._overview_unlocked = False
+        self._password_prompt_open = False
+
         cfg = _load_config()
-        self.ai_model = tk.StringVar(value=str(cfg.get("ai_model") or "gemini-3-flash-preview"))
+        self.ai_model = tk.StringVar(value=ne.normalize_gemini_model(str(cfg.get("ai_model") or "")))
         self.proxy_url = tk.StringVar(value=str(cfg.get("proxy_url") or ""))
         self.user_token = tk.StringVar(value=str(cfg.get("user_token") or ""))
 
@@ -143,6 +151,43 @@ class ScheduleAnalysisApp(tk.Tk):
         self._build_narrative_tab(narrative_tab)
         self._build_delay_tab(delay_tab)
         self._build_overview_tab(overview_tab)
+
+        # Gate the Project Overview tab behind a soft password.
+        self.notebook = notebook
+        self._overview_tab = overview_tab
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _on_tab_changed(self, _event: Any = None) -> None:
+        if self._overview_unlocked or self._password_prompt_open:
+            return
+        try:
+            selected = self.notebook.select()
+        except Exception:
+            return
+        if selected != str(self._overview_tab):
+            return
+
+        self._password_prompt_open = True
+        try:
+            pw = simpledialog.askstring(
+                "Project Overview — Locked",
+                "Enter password to access the Project Overview tab:",
+                show="•",
+                parent=self,
+            )
+        finally:
+            self._password_prompt_open = False
+
+        if pw == OVERVIEW_TAB_PASSWORD:
+            self._overview_unlocked = True
+            return
+        if pw is not None:  # None means the user cancelled
+            messagebox.showerror("Project Overview — Locked", "Incorrect password.")
+        # Send them back to the first tab.
+        try:
+            self.notebook.select(0)
+        except Exception:
+            pass
 
     def _build_narrative_tab(self, root: ttk.Frame) -> None:
         root.columnconfigure(0, weight=1)
@@ -303,16 +348,13 @@ class ScheduleAnalysisApp(tk.Tk):
             parent,
             textvariable=var,
             state="readonly",
-            values=[
-                "gemini-3-flash-preview",
-                "gemini-3-pro-preview",
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-            ],
+            values=ne.GEMINI_MODEL_OPTIONS,
         )
         combo.grid(row=row, column=1, sticky="ew", pady=4)
-        if not var.get().strip():
-            var.set("gemini-3-flash-preview")
+        normalized = ne.normalize_gemini_model(var.get())
+        if normalized not in ne.GEMINI_MODEL_OPTIONS:
+            normalized = ne.DEFAULT_GEMINI_MODEL
+        var.set(normalized)
 
     def _browse_xer(self, var: tk.StringVar) -> None:
         path = filedialog.askopenfilename(
@@ -534,7 +576,7 @@ class ScheduleAnalysisApp(tk.Tk):
                 {
                     "proxy_url": self.proxy_url.get().strip(),
                     "user_token": self.user_token.get().strip(),
-                    "ai_model": self.ai_model.get().strip() or "gemini-3-flash-preview",
+                    "ai_model": ne.normalize_gemini_model(self.ai_model.get()),
                 }
             )
             _save_config(cfg)
@@ -566,7 +608,7 @@ class ScheduleAnalysisApp(tk.Tk):
                 {
                     "proxy_url": proxy_url,
                     "user_token": token,
-                    "ai_model": (self.ai_model.get().strip() or "gemini-3-flash-preview"),
+                    "ai_model": ne.normalize_gemini_model(self.ai_model.get()),
                 }
             )
             _save_config(cfg)
@@ -580,7 +622,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
-                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                model = ne.normalize_gemini_model(self.ai_model.get())
                 if proxy_url and token:
                     narrative = ne.generate_narrative_via_proxy(
                         digest,
@@ -744,7 +786,7 @@ class ScheduleAnalysisApp(tk.Tk):
                 {
                     "proxy_url": proxy_url,
                     "user_token": token,
-                    "ai_model": (self.ai_model.get().strip() or "gemini-3-flash-preview"),
+                    "ai_model": ne.normalize_gemini_model(self.ai_model.get()),
                 }
             )
             _save_config(cfg)
@@ -758,7 +800,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
-                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                model = ne.normalize_gemini_model(self.ai_model.get())
                 if proxy_url and token:
                     report = ne.generate_delay_report_via_proxy(
                         digest,
@@ -827,8 +869,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
     def _build_overview_tab(self, root: ttk.Frame) -> None:
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(3, weight=1)  # Results pane expands.
-        root.rowconfigure(4, weight=1)  # Q&A pane expands.
+        root.rowconfigure(3, weight=1)  # Q&A pane takes all the spare vertical space.
 
         files = ttk.LabelFrame(root, text="File Selection", padding=10)
         files.grid(row=0, column=0, sticky="ew")
@@ -846,27 +887,16 @@ class ScheduleAnalysisApp(tk.Tk):
         run_row.columnconfigure(0, weight=1)
         self.overview_status_var = tk.StringVar(value="Ready.")
         ttk.Label(run_row, textvariable=self.overview_status_var).grid(row=0, column=0, sticky="w")
-        self.overview_run_button = ttk.Button(run_row, text="Analyze", command=self._run_overview_analysis)
-        self.overview_run_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.overview_report_button = ttk.Button(run_row, text="Generate Overview", command=self._generate_overview)
-        self.overview_report_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
-
-        results_frame = ttk.LabelFrame(root, text="Results", padding=10)
-        results_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
-        results_frame.columnconfigure(0, weight=1)
-        results_frame.rowconfigure(0, weight=1)
-        self.overview_results = ScrolledText(results_frame, wrap="none", height=10)
-        self.overview_results.grid(row=0, column=0, sticky="nsew")
-        self._write_to(
-            self.overview_results,
-            {"status": "ready", "hint": "Select a single XER file, then click Analyze to see the project facts and main paths."},
-        )
+        self.overview_report_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.overview_briefing_button = ttk.Button(run_row, text="Handover Briefing", command=self._generate_handover)
+        self.overview_briefing_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         qa = ttk.LabelFrame(root, text="Ask about this schedule (direct Gemini key required)", padding=10)
-        qa.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        qa.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         qa.columnconfigure(0, weight=1)
         qa.rowconfigure(0, weight=1)
-        self.overview_qa_transcript = ScrolledText(qa, wrap="word", height=8, state="disabled")
+        self.overview_qa_transcript = ScrolledText(qa, wrap="word", height=18, state="disabled")
         self.overview_qa_transcript.grid(row=0, column=0, columnspan=2, sticky="nsew")
         self.overview_qa_question = tk.StringVar(value="")
         entry = ttk.Entry(qa, textvariable=self.overview_qa_question)
@@ -875,42 +905,8 @@ class ScheduleAnalysisApp(tk.Tk):
         self.overview_ask_button = ttk.Button(qa, text="Ask", command=self._ask_overview_question)
         self.overview_ask_button.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(8, 0))
 
-    def _run_overview_analysis(self) -> None:
-        path = self.overview_path.get().strip()
-        if not path or not Path(path).exists():
-            messagebox.showerror("Input Error", "XER file path is missing or invalid.")
-            return
-
-        self._last_overview_result = None
-        self._loaded_overview_snapshot = None
-        self.overview_status_var.set("Analyzing schedule...")
-        self.overview_run_button.configure(state="disabled")
-        self.overview_report_button.configure(state="disabled")
-        self.configure(cursor="watch")
-        self.update_idletasks()
-
-        try:
-            snap = xc.snapshot_from_xer_path("schedule", path)
-            overview = si.project_overview(snap)
-            backbones = si.longest_backbones(snap)
-            self._loaded_overview_snapshot = snap
-            self._last_overview_result = {"overview": overview, "backbones": backbones}
-            self._write_to(self.overview_results, self._last_overview_result)
-            self.overview_status_var.set(
-                f"Analysis complete. {overview.get('activity_count')} activities, "
-                f"{backbones.get('backbone_count')} main paths."
-            )
-        except Exception as e:
-            messagebox.showerror("Run Error", str(e))
-            self.overview_status_var.set("Error.")
-        finally:
-            self.configure(cursor="")
-            self.overview_run_button.configure(state="normal")
-            self.overview_report_button.configure(state="normal")
-
     def _generate_overview(self) -> None:
-        if not self._last_overview_result:
-            messagebox.showerror("Generate Overview", "Analyze a schedule first, then generate the overview.")
+        if not self._ensure_overview_loaded() or not self._last_overview_result:
             return
 
         instruction = self.overview_instruction.get("1.0", "end").strip()
@@ -932,12 +928,12 @@ class ScheduleAnalysisApp(tk.Tk):
 
         self.overview_status_var.set("Generating overview...")
         self.overview_report_button.configure(state="disabled")
-        self.overview_run_button.configure(state="disabled")
+        self.overview_briefing_button.configure(state="disabled")
         t0 = time.perf_counter()
 
         def worker() -> None:
             try:
-                model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+                model = ne.normalize_gemini_model(self.ai_model.get())
                 if proxy_url and token:
                     report = ne.generate_narrative_via_proxy(digest, proxy_url=proxy_url, user_token=token, model=model)
                 else:
@@ -959,11 +955,10 @@ class ScheduleAnalysisApp(tk.Tk):
         self.overview_qa_transcript.configure(state="disabled")
 
     def _ask_overview_question(self) -> None:
-        if self._loaded_overview_snapshot is None:
-            messagebox.showerror("Ask", "Analyze a schedule first, then ask questions about it.")
-            return
         question = self.overview_qa_question.get().strip()
         if not question:
+            return
+        if not self._ensure_overview_loaded():
             return
         # Q&A runs the tool-calling agent locally, so it needs a direct Gemini key (not the proxy).
         proxy_url = self.proxy_url.get().strip()
@@ -981,7 +976,7 @@ class ScheduleAnalysisApp(tk.Tk):
         self.overview_ask_button.configure(state="disabled")
         self.overview_status_var.set("Thinking...")
         snapshot = self._loaded_overview_snapshot
-        model = self.ai_model.get().strip() or "gemini-3-flash-preview"
+        model = ne.normalize_gemini_model(self.ai_model.get())
 
         def worker() -> None:
             try:
@@ -999,16 +994,85 @@ class ScheduleAnalysisApp(tk.Tk):
         self.overview_ask_button.configure(state="normal")
         self.overview_status_var.set("Ready.")
 
+    def _ensure_overview_loaded(self) -> bool:
+        """Load + analyze the selected XER if it hasn't been already, so Analyze is optional."""
+        if self._loaded_overview_snapshot is not None:
+            return True
+        path = self.overview_path.get().strip()
+        if not path or not Path(path).exists():
+            messagebox.showerror("Project Overview", "Select a valid XER file first.")
+            return False
+        self.overview_status_var.set("Loading schedule...")
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            snap = xc.snapshot_from_xer_path("schedule", path)
+            self._loaded_overview_snapshot = snap
+            self._last_overview_result = {"overview": si.project_overview(snap), "backbones": si.longest_backbones(snap)}
+            self.overview_status_var.set("Schedule loaded.")
+            return True
+        except Exception as e:
+            messagebox.showerror("Project Overview", str(e))
+            self.overview_status_var.set("Error.")
+            return False
+        finally:
+            self.configure(cursor="")
+
+    def _generate_handover(self) -> None:
+        if not self._ensure_overview_loaded():
+            return
+        # The briefing sends the whole parsed schedule, so it runs against direct Gemini (like Q&A).
+        if not ne.find_api_key():
+            messagebox.showinfo(
+                "Handover Briefing",
+                "The handover briefing sends the full schedule and needs a direct Gemini key "
+                "(GEMINI_API_KEY in environment or a .env file). It does not use the Narrative Proxy.",
+            )
+            return
+
+        try:
+            payload, est_tokens = si.build_handover_payload(self._loaded_overview_snapshot)
+        except Exception as e:
+            messagebox.showerror("Handover Briefing", str(e))
+            return
+        if est_tokens > si.RICH_OVERVIEW_TOKEN_LIMIT:
+            messagebox.showwarning(
+                "Handover Briefing",
+                f"This schedule is large (~{est_tokens:,} tokens) and may exceed the model's context for a "
+                "single-shot briefing. Use 'Generate Overview' (summarized) or the Q&A box instead.",
+            )
+            return
+
+        instruction = self.overview_instruction.get("1.0", "end").strip()
+        self.overview_status_var.set("Generating handover briefing...")
+        self.overview_briefing_button.configure(state="disabled")
+        self.overview_report_button.configure(state="disabled")
+        t0 = time.perf_counter()
+
+        def worker() -> None:
+            try:
+                model = ne.normalize_gemini_model(self.ai_model.get())
+                report = ne.generate_handover_briefing(payload, instruction=instruction or None, model=model)
+            except Exception as exc:
+                msg = str(exc)
+                elapsed = time.perf_counter() - t0
+                self.after(0, lambda m=msg, s=elapsed: self._on_overview_error(m, elapsed_s=s))
+                return
+            elapsed = time.perf_counter() - t0
+            self.after(0, lambda s=elapsed: self._show_overview_window(report, elapsed_s=s))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_overview_error(self, msg: str, *, elapsed_s: float | None = None) -> None:
         self.overview_status_var.set("Error." if elapsed_s is None else f"Error after {elapsed_s:.1f}s.")
         self.overview_report_button.configure(state="normal")
-        self.overview_run_button.configure(state="normal")
+        self.overview_briefing_button.configure(state="normal")
         messagebox.showerror("Overview Error", msg)
 
     def _show_overview_window(self, report: str, *, elapsed_s: float | None = None) -> None:
         self.overview_status_var.set("Overview ready." if elapsed_s is None else f"Overview ready ({elapsed_s:.1f}s).")
         self.overview_report_button.configure(state="normal")
-        self.overview_run_button.configure(state="normal")
+        self.overview_briefing_button.configure(state="normal")
 
         win = tk.Toplevel(self)
         win.title("Project Overview Report")

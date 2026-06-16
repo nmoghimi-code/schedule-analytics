@@ -172,7 +172,7 @@ def answer_question(
     snapshot: xc.XerSnapshot,
     question: str,
     *,
-    model: str = "gemini-2.5-flash",
+    model: str = ne.DEFAULT_GEMINI_MODEL,
     api_key: str | None = None,
 ) -> str:
     """
@@ -183,6 +183,7 @@ def answer_question(
     if ne.genai is None:  # pragma: no cover
         raise RuntimeError("google-generativeai is not available; Q&A requires it.") from ne._GENAI_IMPORT_ERROR
     ne.configure_genai_client(api_key)
+    model = ne.normalize_gemini_model(model)
     tools = build_tools(snapshot)
     model_obj = ne.genai.GenerativeModel(model_name=model, system_instruction=QA_SYSTEM_INSTRUCTION, tools=tools)
     chat = model_obj.start_chat(enable_automatic_function_calling=True)

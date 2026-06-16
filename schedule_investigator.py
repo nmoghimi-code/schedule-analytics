@@ -16,6 +16,7 @@ Correctness note on "longest path":
     critical path for the incomplete tail.
 """
 
+import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -433,3 +434,66 @@ def investigate_from_path(xer_path: str | Path, *, k: int = 5) -> dict[str, Any]
     overview = project_overview(snapshot)
     backbones = longest_backbones(snapshot, k=k)
     return {"overview": overview, "backbones": backbones}
+
+
+# ---------------------------------------------------------------------------
+# Rich handover payload: the WHOLE schedule (no path filtering) plus the
+# code-computed critical path injected as a grounding skeleton.
+# ---------------------------------------------------------------------------
+
+# Rough single-shot ceiling (~tokens). Below this we send the whole schedule in one prompt.
+RICH_OVERVIEW_TOKEN_LIMIT = 700_000
+
+
+def build_handover_payload(snapshot: xc.XerSnapshot) -> tuple[dict[str, Any], int]:
+    """
+    Build a faithful, un-filtered dump of the whole schedule for a 'handover briefing'.
+
+    Includes every activity (trimmed columns: name, WBS, status, dates, total float) and every
+    relationship, plus the project facts and the code-computed current critical path. The critical
+    path + per-activity float are the grounding so the model reports drivers correctly instead of
+    inferring criticality from dates. Returns (payload, estimated_tokens).
+    """
+    records = _activity_records(snapshot)
+    preds_by_succ = _preds_by_succ(snapshot)
+    overview = project_overview(snapshot)
+    backbones = longest_backbones(snapshot)
+    crit = next((b for b in backbones.get("backbones", []) if b.get("is_current_critical_path")), None)
+    critical_sequence = (
+        [
+            {"name": a.get("task_name"), "status": a.get("status"), "finish": a.get("finish_date")}
+            for a in (crit.get("activity_chain") or [])
+        ]
+        if crit
+        else None
+    )
+
+    activities = [
+        {
+            "name": r.get("task_name"),
+            "wbs": r.get("wbs_path"),
+            "status": r.get("status"),
+            "start": _iso(r.get("start")),
+            "finish": _iso(r.get("finish")),
+            "total_float_days": r.get("float_days"),
+            "milestone": r.get("is_milestone"),
+        }
+        for r in records.values()
+    ]
+    relationships = [
+        [records.get(link["pred_aid"], {}).get("task_name"), link.get("relationship_type"),
+         records.get(succ_aid, {}).get("task_name"), link.get("lag_days")]
+        for succ_aid, links in preds_by_succ.items()
+        for link in links
+    ]
+
+    payload = {
+        "report_type": "schedule_handover_briefing",
+        "project_facts": overview,
+        "current_critical_path": critical_sequence,
+        "float_basis": "total_float_days is P6 total float converted to days; an activity at ~0 days is critical. Use it; do not infer float from dates.",
+        "all_activities": activities,
+        "relationships": relationships,
+    }
+    est_tokens = len(json.dumps(payload, default=str).encode("utf-8")) // 4
+    return payload, est_tokens
