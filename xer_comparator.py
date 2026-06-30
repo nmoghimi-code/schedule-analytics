@@ -3384,6 +3384,95 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             return None
         return s
 
+    MAX_AI_GROUPS = 25
+    MAX_AI_GROUP_ITEMS = 5
+    MAX_AI_TOP_LEVEL_ITEMS = 80
+    MAX_AI_BRANCH_SUMMARIES = 12
+    MAX_AI_ALTERNATE_PATH_EXAMPLES = 8
+    MAX_AI_LOGIC_LINKS = 60
+    MAX_AI_CRITICAL_ACTIVITIES = 160
+    MAX_AI_PRIMARY_PATH_ACTIVITIES = 120
+    MAX_AI_SHIFT_EVIDENCE_ITEMS = 25
+
+    def _limit_list(items: Any, max_items: int) -> tuple[list[Any], int, int]:
+        if not isinstance(items, list):
+            return [], 0, 0
+        shown = items[: max(0, max_items)]
+        total = len(items)
+        return shown, total, max(0, total - len(shown))
+
+    def _cap_group_details(group: Any, *, max_items: int = MAX_AI_GROUP_ITEMS) -> dict[str, Any]:
+        if not isinstance(group, Mapping):
+            return {}
+        out = dict(group)
+        for key in ["items", "representative_items"]:
+            value = out.get(key)
+            if not isinstance(value, list):
+                continue
+            shown, total, omitted = _limit_list(value, max_items)
+            out[key] = shown
+            out[f"{key}_shown_count"] = len(shown)
+            out[f"{key}_omitted_count"] = omitted
+            if key == "items":
+                out.setdefault("item_count", total)
+        return out
+
+    def _cap_grouped_summary(
+        summary: Mapping[str, Any],
+        *,
+        max_groups: int = MAX_AI_GROUPS,
+        max_group_items: int = MAX_AI_GROUP_ITEMS,
+        max_items: int = MAX_AI_TOP_LEVEL_ITEMS,
+        max_driving_links: int = MAX_AI_LOGIC_LINKS,
+    ) -> dict[str, Any]:
+        out = dict(summary or {})
+        groups = out.get("groups")
+        if isinstance(groups, list):
+            shown_groups, total_groups, omitted_groups = _limit_list(groups, max_groups)
+            out["groups"] = [
+                group
+                for group in (_cap_group_details(g, max_items=max_group_items) for g in shown_groups)
+                if group
+            ]
+            out.setdefault("group_count", total_groups)
+            out["groups_shown_count"] = len(out["groups"])
+            out["groups_omitted_count"] = omitted_groups
+
+        items = out.get("items")
+        if isinstance(items, list):
+            shown_items, total_items, omitted_items = _limit_list(items, max_items)
+            out["items"] = shown_items
+            out.setdefault("count", total_items)
+            out["items_shown_count"] = len(shown_items)
+            out["items_omitted_count"] = omitted_items
+
+        links = out.get("driving_links")
+        if isinstance(links, list):
+            shown_links, total_links, omitted_links = _limit_list(links, max_driving_links)
+            out["driving_links"] = shown_links
+            out["driving_links_count"] = total_links
+            out["driving_links_shown_count"] = len(shown_links)
+            out["driving_links_omitted_count"] = omitted_links
+        return out
+
+    def _cap_named_lists(
+        summary: Mapping[str, Any],
+        keys: list[str],
+        *,
+        max_items: int = MAX_AI_SHIFT_EVIDENCE_ITEMS,
+    ) -> dict[str, Any]:
+        out = dict(summary or {})
+        for key in keys:
+            value = out.get(key)
+            if not isinstance(value, list):
+                continue
+            shown, total, omitted = _limit_list(value, max_items)
+            out[key] = shown
+            out[f"{key}_count"] = total
+            out[f"{key}_shown_count"] = len(shown)
+            out[f"{key}_omitted_count"] = omitted
+        return out
+
     def _wbs_parts(path: Any, fallback_name: Any = None) -> tuple[str | None, str | None, list[str]]:
         clean_path = _clean_digest_value(path)
         clean_name = _clean_digest_value(fallback_name)
@@ -3879,6 +3968,71 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "impact_statement": summary.get("impact_statement"),
         }
 
+    def _compact_path_change_path(path: Any, *, max_items: int = 24, max_groups: int = 8) -> dict[str, Any] | None:
+        if not isinstance(path, Mapping):
+            return None
+        raw_items = path.get("items") or []
+        shown_items, total_items, omitted_items = _limit_list(raw_items, max_items)
+        groups = [
+            group
+            for group in (_compact_focus_group(g) for g in (path.get("groups") or [])[:max_groups])
+            if group
+        ]
+        return {
+            "length": path.get("length"),
+            "wbs_paths": (path.get("wbs_paths") or [])[:12],
+            "groups": groups,
+            "groups_shown_count": len(groups),
+            "groups_omitted_count": max(0, len(path.get("groups") or []) - len(groups)),
+            "task_sequence": _item_names(raw_items, limit=max_items),
+            "items": [
+                fact
+                for fact in (_activity_float_fact(item) for item in shown_items)
+                if fact
+            ],
+            "items_shown_count": len(shown_items),
+            "items_omitted_count": omitted_items,
+            "item_count": total_items,
+        }
+
+    def _compact_path_change_interpretation(value: Any, *, max_sequence_items: int = 24) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        out = dict(value)
+        for key in [
+            "previous_unique_upstream_sequence",
+            "current_unique_upstream_sequence",
+            "shared_downstream_sequence",
+        ]:
+            sequence = out.get(key)
+            if not isinstance(sequence, list):
+                continue
+            shown, total, omitted = _limit_list(sequence, max_sequence_items)
+            out[key] = _item_names(shown, limit=max_sequence_items)
+            out[f"{key}_count"] = total
+            out[f"{key}_shown_count"] = len(out[key])
+            out[f"{key}_omitted_count"] = omitted
+        return out
+
+    def _compact_alternate_path_examples(paths: list[Any], *, max_examples: int = MAX_AI_ALTERNATE_PATH_EXAMPLES) -> list[dict[str, Any]]:
+        examples: list[dict[str, Any]] = []
+        seen_keys: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+        for path in paths:
+            compact = _compact_focus_path(_path_fact(path), max_tasks=12)
+            if not compact:
+                continue
+            key = (
+                tuple(compact.get("task_sequence") or []),
+                tuple(compact.get("wbs_sequence") or []),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            examples.append(compact)
+            if len(examples) >= max_examples:
+                break
+        return examples
+
     def _summarize_completed_upstream(items: list[dict[str, Any]], *, max_groups: int = 8, max_examples: int = 5) -> dict[str, Any]:
         grouped: dict[str, dict[str, Any]] = {}
         for item in items:
@@ -4096,17 +4250,18 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         for idx, path in enumerate(paths, start=1):
             chain = path.get("activity_chain") or []
             floats = [item.get("float_current_days") for item in chain if isinstance(item, Mapping) and item.get("float_current_days") is not None]
-            branch_summaries.append(
-                {
-                    "branch_number": idx,
-                    "length": path.get("length"),
-                    "task_sequence": _path_task_sequence(path),
-                    "wbs_sequence": _path_wbs_sequence(path),
-                    "min_float_days": min(floats) if floats else None,
-                    "max_float_days": max(floats) if floats else None,
-                    "constraint_drivers": path.get("constraint_drivers") or [],
-                }
-            )
+            if len(branch_summaries) < MAX_AI_BRANCH_SUMMARIES:
+                branch_summaries.append(
+                    {
+                        "branch_number": idx,
+                        "length": path.get("length"),
+                        "task_sequence": _path_task_sequence(path),
+                        "wbs_sequence": _path_wbs_sequence(path),
+                        "min_float_days": min(floats) if floats else None,
+                        "max_float_days": max(floats) if floats else None,
+                        "constraint_drivers": (path.get("constraint_drivers") or [])[:3],
+                    }
+                )
 
             if idx > 1 and primary_ids:
                 first_unique_idx = None
@@ -4177,10 +4332,19 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                         "representative_task_names": [],
                         "min_float_days": None,
                         "max_float_days": None,
+                        "_seen_activity_keys": set(),
                     }
                     grouped_areas[key]["area"] = _compact_wbs_context(grouped_areas[key])
 
                 group = grouped_areas[key]
+                activity_key = (
+                    _clean_digest_value(item.get("activity_id"))
+                    or _clean_digest_value(item.get("task_name"))
+                    or f"path_{idx}_item"
+                )
+                if activity_key in group["_seen_activity_keys"]:
+                    continue
+                group["_seen_activity_keys"].add(activity_key)
                 group["activity_count"] += 1
                 task_name = _clean_digest_value(item.get("task_name"))
                 if task_name and task_name not in group["representative_task_names"]:
@@ -4196,11 +4360,15 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         )
         for group in area_highlights:
             group["representative_task_names"] = group["representative_task_names"][:6]
+            group.pop("_seen_activity_keys", None)
 
         return {
             "target_task_name": target_task_name,
             "least_float_current_days": least_float_current_days,
             "path_count": len(paths),
+            "branch_summary_count": len(paths),
+            "branch_summary_shown_count": len(branch_summaries),
+            "branch_summary_omitted_count": max(0, len(paths) - len(branch_summaries)),
             "primary_path_task_sequence": _path_task_sequence(paths[0] if paths else None),
             "primary_path_wbs_sequence": _path_wbs_sequence(paths[0] if paths else None),
             "longest_tied_path_task_sequence": _path_task_sequence(longest_path),
@@ -4516,12 +4684,52 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     change_delay_new_scope_summary = _group_simple_scope_items(new_change)
     downstream_logic_indicators_summary = _summarize_downstream_logic(cps_items, cross_wbs_alerts)
     look_ahead_summary = _summarize_look_ahead(look_ahead)
+    actualized_work_payload_summary = _cap_grouped_summary(actualized_work_summary)
+    in_progress_finish_extensions_payload_summary = _cap_grouped_summary(in_progress_finish_extensions_summary)
+    global_new_scope_payload_summary = _cap_grouped_summary(global_new_scope_summary)
+    change_delay_new_scope_payload_summary = _cap_grouped_summary(change_delay_new_scope_summary)
+    downstream_logic_indicators_payload_summary = _cap_named_lists(
+        downstream_logic_indicators_summary,
+        [
+            "critical_path_successor_summaries",
+            "critical_path_driver_summaries",
+            "cross_wbs_summaries",
+            "cross_wbs_alerts",
+        ],
+    )
+    eroding_risks_payload_summary = _cap_grouped_summary(eroding_risks_summary, max_groups=0)
+    near_critical_grouped_payload_summary = _cap_grouped_summary(near_critical_grouped_summary)
+    look_ahead_payload_summary = dict(look_ahead_summary)
+    look_ahead_payload_summary["upcoming_work"] = _cap_grouped_summary(
+        (look_ahead_summary.get("upcoming_work") or {}),
+        max_groups=MAX_AI_GROUPS,
+        max_group_items=MAX_AI_GROUP_ITEMS,
+    )
+    look_ahead_payload_summary["schedule_sensitive_upcoming_work"] = _cap_grouped_summary(
+        (look_ahead_summary.get("schedule_sensitive_upcoming_work") or {}),
+        max_groups=MAX_AI_GROUPS,
+        max_group_items=MAX_AI_GROUP_ITEMS,
+    )
     critical_paths = critical_path.get("paths", []) or []
     current_primary_path = critical_paths[0] if critical_paths else None
     alternate_tied_paths = critical_paths[1:]
     current_primary_path_fact = _path_fact(current_primary_path)
-    alternate_tied_path_facts = [p for p in (_path_fact(path) for path in alternate_tied_paths) if p]
+    alternate_tied_path_examples = _compact_alternate_path_examples(alternate_tied_paths)
+    alternate_tied_paths_summary = {
+        "total_count": int(len(alternate_tied_paths)),
+        "shown_example_count": int(len(alternate_tied_path_examples)),
+        "omitted_count": max(0, int(len(alternate_tied_paths) - len(alternate_tied_path_examples))),
+        "examples": alternate_tied_path_examples,
+        "usage_rule": (
+            "These are compact representative alternate/tied branch examples only. Use path_count for the total "
+            "branch count and critical_activity_groups for the overall critical scope."
+        ),
+    }
     critical_activity_facts = _chronological_activity_facts(critical_path.get("critical_activities", []) or [])
+    critical_activity_facts_payload, critical_activity_facts_total, critical_activity_facts_omitted = _limit_list(
+        critical_activity_facts,
+        MAX_AI_CRITICAL_ACTIVITIES,
+    )
     completed_upstream_activity_facts = [
         fact
         for fact in (_activity_float_fact(item) for item in (critical_path.get("completed_upstream_activities", []) or []))
@@ -4529,6 +4737,10 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     ]
     completed_upstream_summary = _summarize_completed_upstream(completed_upstream_activity_facts)
     primary_critical_chain_facts = (current_primary_path_fact or {}).get("activity_chain", []) if current_primary_path_fact else []
+    primary_critical_chain_facts_payload, primary_critical_chain_total, primary_critical_chain_omitted = _limit_list(
+        primary_critical_chain_facts,
+        MAX_AI_PRIMARY_PATH_ACTIVITIES,
+    )
     critical_sequence_role_summary = _critical_sequence_role_examples(critical_activity_facts)
     critical_status_focus_summary = _critical_status_focus(critical_activity_facts)
     chronological_critical_sequence_summary = {
@@ -4542,7 +4754,10 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "parallel branches are interleaved by date. For logical predecessor order use primary_critical_path_0_days "
             "and the primary_path.logic_links; describe tied/parallel branches as parallel, not sequential."
         ),
-        "activity_chain": critical_activity_facts,
+        "activity_count": critical_activity_facts_total,
+        "activity_shown_count": len(critical_activity_facts_payload),
+        "activity_omitted_count": critical_activity_facts_omitted,
+        "activity_chain": critical_activity_facts_payload,
         "current_status_focus": critical_status_focus_summary,
         **critical_sequence_role_summary,
     }
@@ -4554,8 +4769,12 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "near_critical_upper_threshold_days": critical_path.get("absolute_near_critical_threshold_days"),
         "chronological_target_critical_sequence_0_days": chronological_critical_sequence_summary,
         "current_status_focus": critical_status_focus_summary,
-        "primary_critical_path_0_days": primary_critical_chain_facts,
-        "target_critical_activities_0_days": critical_activity_facts,
+        "primary_critical_path_0_days": primary_critical_chain_facts_payload,
+        "primary_critical_path_activity_count": primary_critical_chain_total,
+        "primary_critical_path_omitted_count": primary_critical_chain_omitted,
+        "target_critical_activities_0_days": critical_activity_facts_payload,
+        "target_critical_activity_count": critical_activity_facts_total,
+        "target_critical_activity_omitted_count": critical_activity_facts_omitted,
     }
     near_critical_float_buckets_summary = {
         "classification_source": precomputed_float_buckets_summary["classification_source"],
@@ -4610,14 +4829,20 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         critical_paths,
         critical_path.get("critical_activities", []) or [],
     )
-    critical_path_narrative_focus_summary["critical_activity_groups"] = critical_activity_groups_summary.get("groups")
-    critical_path_narrative_focus_summary["critical_activity_group_count"] = critical_activity_groups_summary.get("group_count")
+    critical_activity_groups_payload_summary = _cap_grouped_summary(
+        critical_activity_groups_summary,
+        max_groups=30,
+        max_group_items=MAX_AI_GROUP_ITEMS,
+        max_items=0,
+    )
+    critical_path_narrative_focus_summary["critical_activity_groups"] = critical_activity_groups_payload_summary.get("groups")
+    critical_path_narrative_focus_summary["critical_activity_group_count"] = critical_activity_groups_payload_summary.get("group_count")
     path_change_summary = {
         "changed": critical_path_change.get("changed"),
         "comparison_basis": critical_path_change.get("comparison_basis"),
-        "path_change_interpretation": critical_path_change.get("path_change_interpretation"),
-        "previous_primary_path": critical_path_change.get("previous_primary_path"),
-        "current_primary_path": critical_path_change.get("current_primary_path"),
+        "path_change_interpretation": _compact_path_change_interpretation(critical_path_change.get("path_change_interpretation")),
+        "previous_primary_path": _compact_path_change_path(critical_path_change.get("previous_primary_path")),
+        "current_primary_path": _compact_path_change_path(critical_path_change.get("current_primary_path")),
         "added_to_current_path_count": critical_path_change.get("added_to_current_path_count"),
         "removed_from_previous_path_count": critical_path_change.get("removed_from_previous_path_count"),
         "added_to_current_path": critical_path_change.get("added_to_current_path"),
@@ -4626,6 +4851,15 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "previous_wbs_removed": critical_path_change.get("previous_wbs_removed"),
         "warning": critical_path_change.get("warning"),
     }
+    path_change_payload_summary = _cap_named_lists(
+        path_change_summary,
+        [
+            "added_to_current_path",
+            "removed_from_previous_path",
+            "current_wbs_added",
+            "previous_wbs_removed",
+        ],
+    )
     upstream_new_critical_context_summary = _compact_upstream_new_critical_links(upstream_new_critical_links)
     supported_shift_evidence_summary = {
         "variance_reason": None,
@@ -4640,6 +4874,15 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "task_field_change_evidence": critical_path_change.get("task_field_change_evidence"),
         "upstream_new_activity_links_to_current_critical_path": upstream_new_critical_context_summary,
     }
+    supported_shift_evidence_payload_summary = _cap_named_lists(
+        supported_shift_evidence_summary,
+        [
+            "possible_shift_causes",
+            "likely_shift_drivers",
+            "relationship_change_evidence",
+            "task_field_change_evidence",
+        ],
+    )
     change_delay_context_summary = {
         "has_critical_path_driver": downstream_logic_indicators_summary.get("has_critical_path_driver"),
         "has_cross_wbs_connection": downstream_logic_indicators_summary.get("has_cross_wbs_connection"),
@@ -4671,14 +4914,14 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             for group in (_compact_focus_group(g) for g in (critical_activity_groups_summary.get("groups") or [])[:5])
             if group
         ],
-        "path_changed_from_previous_update": path_change_summary.get("changed"),
-        "current_wbs_added": path_change_summary.get("current_wbs_added"),
-        "previous_wbs_removed": path_change_summary.get("previous_wbs_removed"),
-        "cause_assessment": supported_shift_evidence_summary.get("cause_assessment"),
+        "path_changed_from_previous_update": path_change_payload_summary.get("changed"),
+        "current_wbs_added": path_change_payload_summary.get("current_wbs_added"),
+        "previous_wbs_removed": path_change_payload_summary.get("previous_wbs_removed"),
+        "cause_assessment": supported_shift_evidence_payload_summary.get("cause_assessment"),
         "top_shift_causes": [
             cause
             for cause in (
-                _compact_shift_cause(c) for c in (supported_shift_evidence_summary.get("possible_shift_causes") or [])[:5]
+                _compact_shift_cause(c) for c in (supported_shift_evidence_payload_summary.get("possible_shift_causes") or [])[:5]
             )
             if cause
         ],
@@ -4743,13 +4986,13 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                     "actualized_work": actualized_work_focus_summary,
                     "in_progress_finish_extensions": in_progress_finish_extensions_focus_summary,
                 },
-                "actualized_work": actualized_work_summary,
-                "in_progress_finish_extensions": in_progress_finish_extensions_summary,
+                "actualized_work": actualized_work_payload_summary,
+                "in_progress_finish_extensions": in_progress_finish_extensions_payload_summary,
             },
             "section_3_scope_changes_new_additions": {
-                "global_new_scope": global_new_scope_summary,
-                "change_delay_new_scope": change_delay_new_scope_summary,
-                "downstream_logic_indicators": downstream_logic_indicators_summary,
+                "global_new_scope": global_new_scope_payload_summary,
+                "change_delay_new_scope": change_delay_new_scope_payload_summary,
+                "downstream_logic_indicators": downstream_logic_indicators_payload_summary,
             },
             "section_4_critical_path_risk": {
                 "date_math_guardrail": date_math_guardrail_summary,
@@ -4775,32 +5018,46 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                     ],
                     "precomputed_float_buckets": precomputed_float_buckets_summary,
                     "critical_status_focus": critical_status_focus_summary,
-                    "critical_activities": critical_activity_facts,
+                    "critical_activities": critical_activity_facts_payload,
+                    "critical_activity_payload_summary": {
+                        "total_count": critical_activity_facts_total,
+                        "shown_count": len(critical_activity_facts_payload),
+                        "omitted_count": critical_activity_facts_omitted,
+                    },
                     "completed_upstream_count": critical_path.get("completed_upstream_count"),
                     "completed_upstream_summary": completed_upstream_summary,
                     "path_count": critical_path.get("path_count"),
-                    "critical_activity_groups": critical_activity_groups_summary,
+                    "critical_activity_groups": critical_activity_groups_payload_summary,
                     "primary_path": current_primary_path_fact,
-                    "alternate_tied_paths": alternate_tied_path_facts,
-                    "links": [_logic_link_fact(link) for link in (critical_path.get("links") or [])],
+                    "alternate_tied_paths": alternate_tied_path_examples,
+                    "alternate_tied_paths_summary": alternate_tied_paths_summary,
+                    "links": [_logic_link_fact(link) for link in (critical_path.get("links") or [])[:MAX_AI_LOGIC_LINKS]],
+                    "links_summary": {
+                        "total_count": len(critical_path.get("links") or []),
+                        "shown_count": min(len(critical_path.get("links") or []), MAX_AI_LOGIC_LINKS),
+                        "omitted_count": max(0, len(critical_path.get("links") or []) - MAX_AI_LOGIC_LINKS),
+                    },
                 },
-                "path_change_from_previous_update": path_change_summary,
-                "supported_shift_evidence": supported_shift_evidence_summary,
-                "change_delay_context": change_delay_context_summary,
+                "path_change_from_previous_update": path_change_payload_summary,
+                "supported_shift_evidence": supported_shift_evidence_payload_summary,
+                "change_delay_context": _cap_named_lists(
+                    change_delay_context_summary,
+                    ["critical_path_successor_summaries", "cross_wbs_alerts"],
+                ),
             },
             "section_5_risks_float_erosion": {
                 "date_math_guardrail": date_math_guardrail_summary,
                 "settings": settings_summary,
                 "precomputed_float_buckets": near_critical_float_buckets_summary,
-                "near_critical_grouped": near_critical_grouped_summary,
-                "eroding_risks": eroding_risks_summary,
+                "near_critical_grouped": near_critical_grouped_payload_summary,
+                "eroding_risks": eroding_risks_payload_summary,
             },
             "section_6_look_ahead_window_analysis": {
                 "settings": settings_summary,
-                "look_ahead_window": look_ahead_summary.get("window"),
-                "upcoming_work": look_ahead_summary.get("upcoming_work"),
-                "schedule_sensitive_upcoming_work": look_ahead_summary.get("schedule_sensitive_upcoming_work"),
-                "warning": look_ahead_summary.get("warning"),
+                "look_ahead_window": look_ahead_payload_summary.get("window"),
+                "upcoming_work": look_ahead_payload_summary.get("upcoming_work"),
+                "schedule_sensitive_upcoming_work": look_ahead_payload_summary.get("schedule_sensitive_upcoming_work"),
+                "warning": look_ahead_payload_summary.get("warning"),
             },
             "section_7_mitigation_inputs": {
                 "critical_path_focus": critical_path_focus_summary,
