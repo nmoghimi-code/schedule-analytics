@@ -410,32 +410,96 @@ class ScheduleAnalysisApp(tk.Tk):
         self.configure(cursor="watch")
         self.update_idletasks()
 
-        try:
-            baseline = xc.snapshot_from_xer_path("baseline", inputs["baseline"])
-            last = xc.snapshot_from_xer_path("last", inputs["last"])
-            current = xc.snapshot_from_xer_path("current", inputs["current"])
+        def worker() -> None:
+            try:
+                baseline = xc.snapshot_from_xer_path("baseline", inputs["baseline"])
+                last = xc.snapshot_from_xer_path("last", inputs["last"])
+                current = xc.snapshot_from_xer_path("current", inputs["current"])
 
-            result = xc.compare_three_way(
-                baseline,
-                last,
-                current,
-                variance_threshold=inputs["variance_threshold"],
-                target_activity_id=inputs["target_activity_id"],
-                look_ahead_horizon_days=inputs["look_ahead_horizon_days"],
-            )
-            self._last_compare_result = result
-            self._write_results(result)
-            self.status_var.set("Analysis complete.")
-            target_warning = (result.get("critical_path_to_target", {}) or {}).get("target_warning")
-            if target_warning:
-                messagebox.showwarning("Target Activity Check", target_warning)
-        except Exception as e:
-            messagebox.showerror("Run Error", str(e))
-            self.status_var.set("Error.")
-        finally:
-            self.configure(cursor="")
-            self.run_button.configure(state="normal")
-            self.narrative_button.configure(state="normal")
+                result = xc.compare_three_way(
+                    baseline,
+                    last,
+                    current,
+                    variance_threshold=inputs["variance_threshold"],
+                    target_activity_id=inputs["target_activity_id"],
+                    look_ahead_horizon_days=inputs["look_ahead_horizon_days"],
+                )
+            except Exception as exc:
+                self.after(0, lambda m=str(exc): self._finish_analysis_error(m))
+                return
+            self.after(0, lambda r=result: self._finish_analysis_success(r))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _analysis_result_preview(self, result: dict[str, Any]) -> dict[str, Any]:
+        critical = result.get("critical_path_to_target", {}) or {}
+        path_change = result.get("critical_path_change", {}) or {}
+        near = result.get("near_critical_trending", {}) or {}
+        work = result.get("work_accomplished", {}) or {}
+        milestone = result.get("milestone", {}) or {}
+        return {
+            "status": "analysis_complete",
+            "note": "Full analysis result is kept in memory for Generate Narrative Report. This preview is compact to keep the app responsive on large schedules.",
+            "settings": result.get("settings"),
+            "update_period": result.get("update_period"),
+            "milestone": {
+                "target_activity_id": milestone.get("target_activity_id"),
+                "baseline_finish": (milestone.get("baseline") or {}).get("finish_date"),
+                "last_finish": (milestone.get("last") or {}).get("finish_date"),
+                "current_finish": (milestone.get("current") or {}).get("finish_date"),
+                "total_variance_days": milestone.get("total_variance_days"),
+                "period_variance_days": milestone.get("period_variance_days"),
+            },
+            "critical_path": {
+                "target_task_name": critical.get("target_task_name"),
+                "least_float_current_days": critical.get("least_float_current_days"),
+                "critical_activity_count": critical.get("critical_count"),
+                "critical_trace_activity_count": len(critical.get("critical_trace_activity_ids") or []),
+                "path_count": critical.get("path_count"),
+                "calendar_bridge_count": critical.get("critical_trace_bridge_count"),
+                "path_generation_truncated": (critical.get("method") or {}).get("path_generation_truncated"),
+            },
+            "critical_path_change": {
+                "changed": path_change.get("changed"),
+                "previous_unique_upstream_count": (
+                    (path_change.get("path_change_interpretation") or {}).get("previous_unique_upstream_count")
+                ),
+                "current_unique_upstream_count": (
+                    (path_change.get("path_change_interpretation") or {}).get("current_unique_upstream_count")
+                ),
+                "shared_downstream_count": (
+                    (path_change.get("path_change_interpretation") or {}).get("shared_downstream_count")
+                ),
+            },
+            "near_critical": {
+                "count": near.get("near_critical_count"),
+                "cutoff_current_days": near.get("cutoff_current_days"),
+                "eroding_risk_count": near.get("eroding_risk_count"),
+            },
+            "progress": {
+                "actualized_count": work.get("count"),
+                "started_count": work.get("started_count"),
+                "finished_count": work.get("finished_count"),
+            },
+        }
+
+    def _finish_analysis_success(self, result: dict[str, Any]) -> None:
+        self._last_compare_result = result
+        self._write_results(self._analysis_result_preview(result))
+        self.status_var.set("Analysis complete.")
+        self.configure(cursor="")
+        self.run_button.configure(state="normal")
+        self.narrative_button.configure(state="normal")
+        target_warning = (result.get("critical_path_to_target", {}) or {}).get("target_warning")
+        if target_warning:
+            messagebox.showwarning("Target Activity Check", target_warning)
+
+    def _finish_analysis_error(self, msg: str) -> None:
+        messagebox.showerror("Run Error", msg)
+        self.status_var.set("Error.")
+        self.configure(cursor="")
+        self.run_button.configure(state="normal")
+        self.narrative_button.configure(state="normal")
 
     def _write_to(self, widget: ScrolledText, obj: Any) -> None:
         try:
@@ -589,7 +653,7 @@ class ScheduleAnalysisApp(tk.Tk):
             messagebox.showerror("Generate Narrative", "Run the analysis first, then generate the narrative report.")
             return
 
-        digest = xc.get_ai_ready_digest(self._last_compare_result)
+        compare_result = self._last_compare_result
 
         proxy_url = self.proxy_url.get().strip()
         token = self.user_token.get().strip()
@@ -622,6 +686,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
+                digest = xc.get_ai_ready_digest(compare_result)
                 model = ne.normalize_gemini_model(self.ai_model.get())
                 if proxy_url and token:
                     narrative = ne.generate_narrative_via_proxy(
@@ -731,35 +796,73 @@ class ScheduleAnalysisApp(tk.Tk):
         self.configure(cursor="watch")
         self.update_idletasks()
 
-        try:
-            result = da.analyze_delays_from_paths(
-                inputs["baseline"],
-                inputs["updates"],
-                target_activity_id=inputs["target"],
-                variance_threshold=DELAY_FLOAT_TOLERANCE_DAYS,
-            )
-            self._last_delay_result = result
-            self._write_to(self.delay_results, result)
-            n_changed = sum(1 for t in result.get("transitions", []) if t.get("path_changed"))
-            self.delay_status_var.set(
-                f"Delay analysis complete. {result['settings']['update_count']} updates, {n_changed} path change(s)."
-            )
-            validation = result.get("target_validation", {}) or {}
-            warnings = validation.get("warnings") or []
-            if warnings:
-                lead = (
-                    "The target has no driving logic in one or more updates, so the delay story may be meaningless.\n\n"
-                    if not validation.get("has_driving_logic_all_updates", True)
-                    else ""
+        def worker() -> None:
+            try:
+                result = da.analyze_delays_from_paths(
+                    inputs["baseline"],
+                    inputs["updates"],
+                    target_activity_id=inputs["target"],
+                    variance_threshold=DELAY_FLOAT_TOLERANCE_DAYS,
                 )
-                messagebox.showwarning("Target Activity Check", lead + "\n\n".join(warnings))
-        except Exception as e:
-            messagebox.showerror("Run Error", str(e))
-            self.delay_status_var.set("Error.")
-        finally:
-            self.configure(cursor="")
-            self.delay_run_button.configure(state="normal")
-            self.delay_report_button.configure(state="normal")
+            except Exception as exc:
+                self.after(0, lambda m=str(exc): self._finish_delay_analysis_error(m))
+                return
+            self.after(0, lambda r=result: self._finish_delay_analysis_success(r))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _delay_result_preview(self, result: dict[str, Any]) -> dict[str, Any]:
+        transitions = result.get("transitions", []) or []
+        changed = [t for t in transitions if t.get("path_changed")]
+        return {
+            "status": "delay_analysis_complete",
+            "note": "Full delay analysis result is kept in memory for Generate Delay Report. This preview is compact to keep the app responsive on large schedules.",
+            "settings": result.get("settings"),
+            "target_validation": result.get("target_validation"),
+            "summary": {
+                "transition_count": len(transitions),
+                "path_change_count": len(changed),
+                "target_health": result.get("target_health"),
+            },
+            "transitions_preview": [
+                {
+                    "from_update": t.get("from_update"),
+                    "to_update": t.get("to_update"),
+                    "period_variance_days": t.get("period_variance_days"),
+                    "path_changed": t.get("path_changed"),
+                    "shift_classification": t.get("shift_classification"),
+                    "active_driver": ((t.get("critical_path_summary") or {}).get("active_driver") or {}).get("task_name"),
+                }
+                for t in transitions[:20]
+            ],
+        }
+
+    def _finish_delay_analysis_success(self, result: dict[str, Any]) -> None:
+        self._last_delay_result = result
+        self._write_to(self.delay_results, self._delay_result_preview(result))
+        n_changed = sum(1 for t in result.get("transitions", []) if t.get("path_changed"))
+        self.delay_status_var.set(
+            f"Delay analysis complete. {result['settings']['update_count']} updates, {n_changed} path change(s)."
+        )
+        self.configure(cursor="")
+        self.delay_run_button.configure(state="normal")
+        self.delay_report_button.configure(state="normal")
+        validation = result.get("target_validation", {}) or {}
+        warnings = validation.get("warnings") or []
+        if warnings:
+            lead = (
+                "The target has no driving logic in one or more updates, so the delay story may be meaningless.\n\n"
+                if not validation.get("has_driving_logic_all_updates", True)
+                else ""
+            )
+            messagebox.showwarning("Target Activity Check", lead + "\n\n".join(warnings))
+
+    def _finish_delay_analysis_error(self, msg: str) -> None:
+        messagebox.showerror("Run Error", msg)
+        self.delay_status_var.set("Error.")
+        self.configure(cursor="")
+        self.delay_run_button.configure(state="normal")
+        self.delay_report_button.configure(state="normal")
 
     def _generate_delay_report(self) -> None:
         if not self._last_delay_result:
@@ -767,7 +870,7 @@ class ScheduleAnalysisApp(tk.Tk):
             return
 
         instruction = self.delay_instruction.get("1.0", "end").strip()
-        digest = da.build_delay_digest(self._last_delay_result, instruction=instruction or None)
+        delay_result = self._last_delay_result
 
         proxy_url = self.proxy_url.get().strip()
         token = self.user_token.get().strip()
@@ -800,6 +903,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
+                digest = da.build_delay_digest(delay_result, instruction=instruction or None)
                 model = ne.normalize_gemini_model(self.ai_model.get())
                 if proxy_url and token:
                     report = ne.generate_delay_report_via_proxy(
