@@ -71,7 +71,7 @@ def _save_config(cfg: dict[str, Any]) -> None:
 class ScheduleAnalysisApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Schedule Analysis Tool (XER) — {_build_label()}")
+        self.title(f"Schedule Analysis Tool — {_build_label()}")
         self.minsize(900, 780)
 
         self.baseline_path = tk.StringVar(value="")
@@ -86,7 +86,7 @@ class ScheduleAnalysisApp(tk.Tk):
         self.delay_baseline_path = tk.StringVar(value="")
         self.delay_target_activity_id = tk.StringVar(value="A3000")
 
-        # Project Overview tab (single XER).
+        # Project Overview tab (single schedule).
         self.overview_path = tk.StringVar(value="")
 
         self._last_compare_result: dict[str, Any] | None = None
@@ -197,9 +197,9 @@ class ScheduleAnalysisApp(tk.Tk):
         files.grid(row=0, column=0, sticky="ew")
         files.columnconfigure(1, weight=1)
 
-        self._file_row(files, 0, "Baseline XER:", self.baseline_path)
-        self._file_row(files, 1, "Last Update XER:", self.last_path)
-        self._file_row(files, 2, "Current Update XER:", self.current_path)
+        self._file_row(files, 0, "Baseline Schedule:", self.baseline_path)
+        self._file_row(files, 1, "Last Update Schedule:", self.last_path)
+        self._file_row(files, 2, "Current Update Schedule:", self.current_path)
 
         settings = ttk.LabelFrame(root, text="Settings", padding=10)
         settings.grid(row=1, column=0, sticky="ew", pady=(10, 10))
@@ -235,7 +235,10 @@ class ScheduleAnalysisApp(tk.Tk):
         self.results = ScrolledText(results_frame, wrap="none", height=16)
         self.results.grid(row=0, column=0, sticky="nsew")
 
-        self._write_to(self.results, {"status": "ready", "hint": "Select three XER files, set inputs, then click Run."})
+        self._write_to(
+            self.results,
+            {"status": "ready", "hint": "Select three XER or Microsoft Project XML files, set inputs, then click Run."},
+        )
 
     def _build_delay_tab(self, root: ttk.Frame) -> None:
         root.columnconfigure(0, weight=1)
@@ -245,7 +248,7 @@ class ScheduleAnalysisApp(tk.Tk):
         files.grid(row=0, column=0, sticky="ew")
         files.columnconfigure(1, weight=1)
 
-        self._file_row(files, 0, "Baseline XER:", self.delay_baseline_path)
+        self._file_row(files, 0, "Baseline Schedule:", self.delay_baseline_path)
 
         ttk.Label(files, text="Updates (chronological; auto-sorted by data date):").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(8, 2)
@@ -310,7 +313,7 @@ class ScheduleAnalysisApp(tk.Tk):
         for child in self.delay_updates_frame.winfo_children():
             child.destroy()
         for i, var in enumerate(self.delay_update_paths):
-            ttk.Label(self.delay_updates_frame, text=f"Update {i + 1} XER:").grid(
+            ttk.Label(self.delay_updates_frame, text=f"Update {i + 1} Schedule:").grid(
                 row=i, column=0, sticky="w", padx=(0, 8), pady=3
             )
             ttk.Entry(self.delay_updates_frame, textvariable=var).grid(row=i, column=1, sticky="ew", pady=3)
@@ -358,8 +361,13 @@ class ScheduleAnalysisApp(tk.Tk):
 
     def _browse_xer(self, var: tk.StringVar) -> None:
         path = filedialog.askopenfilename(
-            title="Select XER File",
-            filetypes=[("Primavera XER", "*.xer *.XER"), ("All Files", "*.*")],
+            title="Select Schedule File",
+            filetypes=[
+                ("Schedule files", "*.xer *.XER *.xml *.XML"),
+                ("Primavera XER", "*.xer *.XER"),
+                ("Microsoft Project XML", "*.xml *.XML"),
+                ("All Files", "*.*"),
+            ],
         )
         if path:
             var.set(path)
@@ -371,7 +379,7 @@ class ScheduleAnalysisApp(tk.Tk):
 
         missing = [p for p in [baseline, last, current] if not p.as_posix() or not p.exists()]
         if missing:
-            raise ValueError("One or more XER file paths are missing or invalid.")
+            raise ValueError("One or more schedule file paths are missing or invalid.")
 
         target = self.target_activity_id.get().strip()
         if not target:
@@ -412,9 +420,9 @@ class ScheduleAnalysisApp(tk.Tk):
 
         def worker() -> None:
             try:
-                baseline = xc.snapshot_from_xer_path("baseline", inputs["baseline"])
-                last = xc.snapshot_from_xer_path("last", inputs["last"])
-                current = xc.snapshot_from_xer_path("current", inputs["current"])
+                baseline = xc.snapshot_from_schedule_path("baseline", inputs["baseline"])
+                last = xc.snapshot_from_schedule_path("last", inputs["last"])
+                current = xc.snapshot_from_schedule_path("current", inputs["current"])
 
                 result = xc.compare_three_way(
                     baseline,
@@ -763,7 +771,7 @@ class ScheduleAnalysisApp(tk.Tk):
     def _validate_delay_inputs(self) -> dict[str, Any]:
         baseline = self.delay_baseline_path.get().strip()
         if not baseline or not Path(baseline).exists():
-            raise ValueError("Baseline XER path is missing or invalid.")
+            raise ValueError("Baseline schedule path is missing or invalid.")
 
         updates: list[str] = []
         for var in self.delay_update_paths:
@@ -771,10 +779,10 @@ class ScheduleAnalysisApp(tk.Tk):
             if not p:
                 continue
             if not Path(p).exists():
-                raise ValueError(f"Update XER path does not exist:\n{p}")
+                raise ValueError(f"Update schedule path does not exist:\n{p}")
             updates.append(p)
         if len(updates) < 2:
-            raise ValueError("Provide at least two update XER files for delay analysis.")
+            raise ValueError("Provide at least two update schedule files for delay analysis.")
 
         target = self.delay_target_activity_id.get().strip()
         if not target:
@@ -978,7 +986,7 @@ class ScheduleAnalysisApp(tk.Tk):
         files = ttk.LabelFrame(root, text="File Selection", padding=10)
         files.grid(row=0, column=0, sticky="ew")
         files.columnconfigure(1, weight=1)
-        self._file_row(files, 0, "XER File:", self.overview_path)
+        self._file_row(files, 0, "Schedule File:", self.overview_path)
 
         instr = ttk.LabelFrame(root, text="Report Instruction (optional)", padding=10)
         instr.grid(row=1, column=0, sticky="ew", pady=(10, 10))
@@ -1099,18 +1107,18 @@ class ScheduleAnalysisApp(tk.Tk):
         self.overview_status_var.set("Ready.")
 
     def _ensure_overview_loaded(self) -> bool:
-        """Load + analyze the selected XER if it hasn't been already, so Analyze is optional."""
+        """Load + analyze the selected schedule if it hasn't been already."""
         if self._loaded_overview_snapshot is not None:
             return True
         path = self.overview_path.get().strip()
         if not path or not Path(path).exists():
-            messagebox.showerror("Project Overview", "Select a valid XER file first.")
+            messagebox.showerror("Project Overview", "Select a valid XER or Microsoft Project XML file first.")
             return False
         self.overview_status_var.set("Loading schedule...")
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            snap = xc.snapshot_from_xer_path("schedule", path)
+            snap = xc.snapshot_from_schedule_path("schedule", path)
             self._loaded_overview_snapshot = snap
             self._last_overview_result = {"overview": si.project_overview(snap), "backbones": si.longest_backbones(snap)}
             self.overview_status_var.set("Schedule loaded.")

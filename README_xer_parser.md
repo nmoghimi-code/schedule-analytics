@@ -2,6 +2,23 @@
 
 `xer_parser.py` reads the `PROJECT`, `TASK`, `TASKPRED`, and `WBS` tables from a P6 `.XER` (tab-delimited) export, identifies the **Data Date**, finds the **least float** (including negatives), and flags **near-critical** activities relative to a target activity. It also maps `wbs_name` onto each task and adds `is_milestone`.
 
+## Supported desktop-app schedule files
+
+The desktop application accepts:
+
+- Primavera P6 `.xer`
+- Microsoft Project XML (`.xml`, MSPDI format)
+
+Microsoft Project XML must have a `<Project>` root in the Microsoft Project namespace, normally
+`http://schemas.microsoft.com/project/2007`. Oracle Primavera P6 XML exports use a different schema
+and are not interchangeable with Microsoft Project XML; use the original XER for those schedules.
+
+For Microsoft Project XML, task UID (or a custom field aliased as `Activity ID`, when present) is used
+as the stable activity key. Use the same identifier across baseline and update files.
+
+The format-neutral loader delegates `.xer` files directly to the original XER loader. XML-specific
+progress, TotalSlack, summary-task, and narrative safeguards are enabled only for MSPDI snapshots.
+
 ## Usage
 
 ```bash

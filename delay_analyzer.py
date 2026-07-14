@@ -316,8 +316,8 @@ def analyze_delays_from_paths(
     target_activity_id: str,
     variance_threshold: int,
 ) -> dict[str, Any]:
-    baseline = xc.snapshot_from_xer_path("baseline", baseline_path) if baseline_path else None
-    updates = [xc.snapshot_from_xer_path(f"update_{i + 1}", p) for i, p in enumerate(update_paths)]
+    baseline = xc.snapshot_from_schedule_path("baseline", baseline_path) if baseline_path else None
+    updates = [xc.snapshot_from_schedule_path(f"update_{i + 1}", p) for i, p in enumerate(update_paths)]
     return analyze_delays(baseline, updates, target_activity_id=target_activity_id, variance_threshold=variance_threshold)
 
 

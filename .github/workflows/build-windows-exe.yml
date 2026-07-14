@@ -41,12 +41,12 @@ jobs:
       - name: Build EXE (embedded key)
         if: ${{ env.GEMINI_API_KEY != '' }}
         run: |
-          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --hidden-import schedule_xml_parser --name ScheduleAnalytics main.py
 
       - name: Build EXE (no embedded key)
         if: ${{ env.GEMINI_API_KEY == '' }}
         run: |
-          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --noconsole --hidden-import scheduleanalytics_build --hidden-import schedule_xml_parser --name ScheduleAnalytics main.py
 
       - name: SHA256
         shell: pwsh

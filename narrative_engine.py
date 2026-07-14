@@ -398,6 +398,18 @@ Required narrative structure:
    - Keep recommendations specific to the described drivers, risks, trades, and locations/levels. Do not recommend unrelated actions.
 """
 
+MSPDI_REPORT_GUIDELINES = """
+
+Microsoft Project XML rules (apply only because schedule_source is mspdi_xml):
+- This schedule came from Microsoft Project XML. Refer to Microsoft Project TotalSlack, never P6 total float.
+- The near-critical cutoff is the exact configured cutoff supplied in the JSON. Do not replace it with the largest observed activity slack.
+- If period_assessment_available is false, state that reporting-period progress and float erosion cannot be assessed because StatusDate did not advance. Any progress, duration, or slack differences are file-version differences only, not changes attributable to an update period.
+- Use microsoft_project_progress_changes for PercentComplete, PhysicalPercentComplete, and remaining-duration changes. Call them period achievements only when period_assessment_available is true.
+- Microsoft Project summary/WBS tasks are excluded from look-ahead activity counts. Do not describe a project or WBS summary task as a milestone.
+- Do not introduce subcontractors, labour/resources, utility locates, permits, municipal approvals, inspections, procurement expediting, or resource levelling unless the JSON explicitly contains evidence for that specific item.
+- When a variance is zero, simply state that there was no movement. Do not add that a cause is not determinable.
+"""
+
 SYSTEM_DELAY_ANALYSIS_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a schedule delay analysis across multiple schedule updates for an owner/GC report.
 Your goal is to tell the story of how the target milestone's critical path and completion date evolved across the updates, using ONLY the provided JSON.
 
@@ -726,7 +738,10 @@ def generate_narrative(data_digest: Mapping[str, Any], *, api_key: str | None = 
     """Generate a schedule narrative using Gemini."""
     # Keep payload compact to reduce request size / latency.
     user_content = json.dumps(data_digest, default=str)
-    return _run_gemini(SYSTEM_REPORT_GUIDELINES, user_content, model=model, api_key=api_key)
+    system_instruction = SYSTEM_REPORT_GUIDELINES
+    if data_digest.get("schedule_source") == "mspdi_xml":
+        system_instruction += MSPDI_REPORT_GUIDELINES
+    return _run_gemini(system_instruction, user_content, model=model, api_key=api_key)
 
 
 SYSTEM_PROJECT_OVERVIEW_GUIDELINES = """You are a Senior Project Planner at EllisDon writing a plain-language overview of a single construction schedule (one XER file) for an owner/GC reader who wants to understand the project at a glance. Use ONLY the provided JSON.
@@ -800,6 +815,23 @@ Write the briefing with these sections:
    - 2-3 concrete suggestions of what the incoming scheduler should review first, tied to the drivers and risks above.
 """
 
+MSPDI_PROJECT_OVERVIEW_GUIDELINES = """
+
+Microsoft Project XML rules (apply only because schedule_source is mspdi_xml):
+- The schedule is a Microsoft Project XML export, not an XER. Computed dates and logic come from Microsoft Project.
+- Refer to Microsoft Project TotalSlack if float is discussed; never describe it as P6 total float.
+- Do not treat Microsoft Project summary/WBS tasks as milestones or physical work activities.
+"""
+
+MSPDI_HANDOVER_BRIEFING_GUIDELINES = """
+
+Microsoft Project XML rules (apply only because schedule_source is mspdi_xml):
+- The schedule is a Microsoft Project XML export, not an XER.
+- total_float_days is derived from Microsoft Project TotalSlack using the export's MinutesPerDay value. Never call it P6 total float.
+- Do not treat Microsoft Project summary/WBS tasks as milestones or physical work activities.
+- Do not invent resources, subcontractors, permits, approvals, utility locates, or resource-levelling actions unless explicitly supported by the JSON.
+"""
+
 
 def generate_handover_briefing(
     payload: Mapping[str, Any],
@@ -810,9 +842,11 @@ def generate_handover_briefing(
 ) -> str:
     """Generate a full-schedule handover briefing (sends the whole parsed schedule) using Gemini."""
     system_instruction = SYSTEM_HANDOVER_BRIEFING_GUIDELINES
+    if payload.get("schedule_source") == "mspdi_xml":
+        system_instruction += MSPDI_HANDOVER_BRIEFING_GUIDELINES
     if instruction and str(instruction).strip():
         system_instruction = (
-            SYSTEM_HANDOVER_BRIEFING_GUIDELINES
+            system_instruction
             + "\n\nAdditional user instruction for this run (follow it unless it conflicts with the no-invention rule):\n"
             + str(instruction).strip()
         )
@@ -829,9 +863,11 @@ def generate_project_overview(
 ) -> str:
     """Generate a single-schedule project overview report using Gemini."""
     system_instruction = SYSTEM_PROJECT_OVERVIEW_GUIDELINES
+    if overview_digest.get("schedule_source") == "mspdi_xml":
+        system_instruction += MSPDI_PROJECT_OVERVIEW_GUIDELINES
     if instruction and str(instruction).strip():
         system_instruction = (
-            SYSTEM_PROJECT_OVERVIEW_GUIDELINES
+            system_instruction
             + "\n\nAdditional user instruction for this run (follow it unless it conflicts with the no-invention rule):\n"
             + str(instruction).strip()
         )

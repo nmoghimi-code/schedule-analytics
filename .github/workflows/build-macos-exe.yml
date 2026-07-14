@@ -55,14 +55,14 @@ jobs:
       - name: Build (native arch, embedded key)
         if: ${{ env.GEMINI_API_KEY != '' }}
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_secrets --hidden-import scheduleanalytics_build --hidden-import schedule_xml_parser --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 
       - name: Build (native arch, no embedded key)
         if: ${{ env.GEMINI_API_KEY == '' }}
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_build --name ScheduleAnalytics main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --hidden-import scheduleanalytics_build --hidden-import schedule_xml_parser --name ScheduleAnalytics main.py
           chmod +x dist/ScheduleAnalytics
           file dist/ScheduleAnalytics
 

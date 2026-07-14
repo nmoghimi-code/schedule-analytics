@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Tier-2 schedule Q&A: a function-calling agent over a single parsed XER schedule.
+Tier-2 schedule Q&A: a function-calling agent over a single parsed schedule.
 
 Gemini is given tool functions that query the loaded `XerSnapshot` (find activities, look up logic,
 trace driving paths, etc.) and answers from real data instead of guessing. The tools execute

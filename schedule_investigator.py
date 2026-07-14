@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Single-XER schedule investigation.
+Single-schedule investigation (Primavera XER or Microsoft Project XML).
 
 Produces a "what is this project" overview plus the schedule's main longest paths
 (backbones), for a one-file investigation tab. Reuses xer_comparator helpers so the
@@ -329,9 +329,18 @@ def project_overview(snapshot: xc.XerSnapshot) -> dict[str, Any]:
     for r in records.values():
         status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
 
-    pct_col = xp._pick_col(t, ["phys_complete_pct", "physical_percent_complete"])
+    pct_col = (
+        "msp_percent_complete"
+        if xc._is_mspdi(snapshot) and "msp_percent_complete" in t.columns
+        else xp._pick_col(t, ["phys_complete_pct", "physical_percent_complete"])
+    )
     if pct_col:
-        pct = pd.to_numeric(t[pct_col], errors="coerce")
+        pct_rows = t
+        if xc._is_mspdi(snapshot):
+            aid_col = xp._pick_col(t, ["task_code", "activity_id"])
+            if aid_col:
+                pct_rows = t[t[aid_col].astype(str).str.strip().isin(records)]
+        pct = pd.to_numeric(pct_rows[pct_col], errors="coerce")
         overall_pct = round(float(pct.mean(skipna=True)), 1) if pct.notna().any() else None
     else:
         overall_pct = round(100.0 * status_counts["completed"] / max(1, len(records)), 1)
@@ -370,7 +379,7 @@ def project_overview(snapshot: xc.XerSnapshot) -> dict[str, Any]:
         if root_name_col and len(snapshot.wbs):
             proj_name = xc._clean_optional(snapshot.wbs.iloc[0].get(root_name_col))
 
-    return {
+    result = {
         "project_name": proj_name,
         "data_date": _iso(snapshot.data_date),
         "schedule_start": _iso(proj_start),
@@ -383,6 +392,9 @@ def project_overview(snapshot: xc.XerSnapshot) -> dict[str, Any]:
         "wbs_scope_top_areas": [{"area": k, "activity_count": v} for k, v in top_wbs],
         "milestones": milestones[:40],
     }
+    if xc._is_mspdi(snapshot):
+        result["source_format"] = "mspdi_xml"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -426,11 +438,14 @@ def build_investigation_digest(
     }
     if instruction and str(instruction).strip():
         digest["user_instruction"] = str(instruction).strip()
+    if overview.get("source_format") == "mspdi_xml":
+        digest["schedule_source"] = "mspdi_xml"
     return digest
 
 
 def investigate_from_path(xer_path: str | Path, *, k: int = 5) -> dict[str, Any]:
-    snapshot = xc.snapshot_from_xer_path("schedule", xer_path)
+    # Keep the original keyword name for callers; the loader now accepts XML too.
+    snapshot = xc.snapshot_from_schedule_path("schedule", xer_path)
     overview = project_overview(snapshot)
     backbones = longest_backbones(snapshot, k=k)
     return {"overview": overview, "backbones": backbones}
@@ -491,9 +506,16 @@ def build_handover_payload(snapshot: xc.XerSnapshot) -> tuple[dict[str, Any], in
         "report_type": "schedule_handover_briefing",
         "project_facts": overview,
         "current_critical_path": critical_sequence,
-        "float_basis": "total_float_days is P6 total float converted to days; an activity at ~0 days is critical. Use it; do not infer float from dates.",
+        "float_basis": (
+            "total_float_days is Microsoft Project TotalSlack converted to days using the exported MinutesPerDay; "
+            "an activity at ~0 days is critical. Use it; do not infer slack from dates."
+            if xc._is_mspdi(snapshot)
+            else "total_float_days is P6 total float converted to days; an activity at ~0 days is critical. Use it; do not infer float from dates."
+        ),
         "all_activities": activities,
         "relationships": relationships,
     }
+    if xc._is_mspdi(snapshot):
+        payload["schedule_source"] = "mspdi_xml"
     est_tokens = len(json.dumps(payload, default=str).encode("utf-8")) // 4
     return payload, est_tokens

@@ -22,6 +22,9 @@ class XerSnapshot:
     calendar: pd.DataFrame
     data_date: pd.Timestamp | None
     data_date_col: str | None
+    # Kept on the existing snapshot type so downstream analysis can apply
+    # source-specific safeguards without changing the established XER path.
+    source_format: str = "xer"
 
 
 # Shared with the parser module; kept as a single implementation there.
@@ -74,6 +77,14 @@ def snapshot_from_tables(label: str, tables: Mapping[str, pd.DataFrame]) -> XerS
     task = xp.add_full_wbs_path(task, wbs)
 
     data_date, data_date_col = _extract_project_data_date(project)
+    source_format = "xer"
+    for frame in (project, task):
+        if frame is None or frame.empty or "source_format" not in frame.columns:
+            continue
+        values = frame["source_format"].dropna().astype(str).str.strip()
+        if not values.empty and values.iloc[0]:
+            source_format = values.iloc[0]
+            break
     return XerSnapshot(
         label=label,
         project=project,
@@ -83,12 +94,49 @@ def snapshot_from_tables(label: str, tables: Mapping[str, pd.DataFrame]) -> XerS
         calendar=calendar,
         data_date=data_date,
         data_date_col=data_date_col,
+        source_format=source_format,
     )
 
 
 def snapshot_from_xer_path(label: str, xer_path: str | Path) -> XerSnapshot:
     tables = xp.read_xer_tables(xer_path, ["PROJECT", "TASK", "TASKPRED", "WBS", "PROJWBS", "CALENDAR"])
     return snapshot_from_tables(label, tables)
+
+
+def snapshot_from_schedule_path(label: str, schedule_path: str | Path) -> XerSnapshot:
+    """Load either a Primavera XER or Microsoft Project XML schedule."""
+    path = Path(schedule_path)
+    suffix = path.suffix.casefold()
+    if suffix == ".xer":
+        return snapshot_from_xer_path(label, path)
+    if suffix == ".xml":
+        import schedule_xml_parser as sxp
+
+        return snapshot_from_tables(label, sxp.read_mspdi_tables(path))
+    raise ValueError(
+        f"Unsupported schedule format '{path.suffix or '(none)'}'. Select a Primavera .xer or "
+        "Microsoft Project .xml file."
+    )
+
+
+def _is_mspdi(snapshot: XerSnapshot | None) -> bool:
+    return snapshot is not None and snapshot.source_format == "mspdi_xml"
+
+
+def _float_basis_text(snapshot: XerSnapshot, *, short: bool = False) -> str:
+    if _is_mspdi(snapshot):
+        if short:
+            return (
+                "Microsoft Project TotalSlack converted from tenths of a minute to days using the "
+                "exported MinutesPerDay value; do not infer slack from date gaps."
+            )
+        return (
+            "Microsoft Project TotalSlack converted from tenths of a minute to days using the exported "
+            "MinutesPerDay value; dates are context only."
+        )
+    if short:
+        return "P6 total float converted to days in Python using the activity calendar; do not infer float from date gaps."
+    return "P6 total float converted to days in Python using the activity calendar; dates are context only."
 
 
 def _resolve_target_row(task_df: pd.DataFrame, target_activity_id: str) -> pd.Series:
@@ -432,9 +480,19 @@ def near_critical_trending(
 
     loss_days = float_last_days - float_current_days
 
+    erosion_assessment_warning: str | None = None
     if days_between is None:
         days_passed = None
         eroding_mask = pd.Series([False] * len(merged), index=merged.index)
+    elif _is_mspdi(current) and days_between <= 0:
+        # Keep file-to-file slack changes visible, but do not call them period
+        # erosion when Microsoft Project exported no advancing StatusDate.
+        days_passed = float(max(0, days_between))
+        eroding_mask = pd.Series([False] * len(merged), index=merged.index)
+        erosion_assessment_warning = (
+            "Microsoft Project StatusDate did not advance between the previous and current XML files. "
+            "Slack changes are file-version differences; period float erosion cannot be assessed."
+        )
     else:
         days_passed = float(max(0, days_between))
         eroding_mask = loss_days > days_passed
@@ -464,7 +522,7 @@ def near_critical_trending(
                     if "calendar_id" not in merged.columns or pd.isna(r.get("calendar_id"))
                     else calendar_hours.get(str(r.get("calendar_id")), xp.P6_HOURS_PER_DAY)
                 ),
-                "float_basis": "P6 total float converted to days in Python using the activity calendar; dates are context only.",
+                "float_basis": _float_basis_text(current),
                 "days_passed": days_passed,
                 "eroding_risk": bool(eroding_mask.loc[idx]),
             }
@@ -489,7 +547,7 @@ def near_critical_trending(
                     }
                 )
 
-    return {
+    result = {
         "days_between": days_between,
         "least_float_current_days": critical_network.get("least_float_current_days"),
         "cutoff_current_days": critical_network.get("absolute_near_critical_threshold_days"),
@@ -502,6 +560,9 @@ def near_critical_trending(
         "eroding_risk_count": int(len(eroding)),
         "eroding_risks": eroding,
     }
+    if erosion_assessment_warning:
+        result["erosion_assessment_warning"] = erosion_assessment_warning
+    return result
 
 
 def wbs_monitor_change_and_delay(last: XerSnapshot, current: XerSnapshot, *, term: str = "change") -> dict[str, Any]:
@@ -1564,7 +1625,7 @@ def critical_path_to_target(
             "on_critical_trace": aid in critical_trace_activity_ids,
             "float_current_days": float_days_by_activity.get(aid),
             "float_current_raw_hours": float_raw_by_activity.get(aid),
-            "float_basis": "P6 total float converted to days in Python using the activity calendar; do not infer float from date gaps.",
+            "float_basis": _float_basis_text(current, short=True),
             "completed": aid in completed_activity_ids,
             "forecast_start_date": None if forecast_start is None else forecast_start.isoformat(),
             "forecast_finish_date": None if forecast_finish is None else forecast_finish.isoformat(),
@@ -1627,6 +1688,23 @@ def critical_path_to_target(
         seen_links.add(key)
         dedup_links.append(l)
 
+    method_description = (
+        "Treats TASK/TASKPRED as a DAG and traces backward from the target. Critical branches continue through "
+        "predecessors whose total float is less than or equal to the current branch float within tolerance. If no "
+        "predecessor matches the current branch float, the trace bridges only to the minimum-float predecessor(s) "
+        "when a predecessor/successor calendar-context difference is detected and the current activity is not "
+        "constraint-driven; this calendar bridge is independent of the near-critical threshold. Near-critical work "
+        "is not path-traced; it is classified across non-summary current-schedule activities by "
+        + ("Microsoft Project TotalSlack" if _is_mspdi(current) else "P6 total float")
+        + " threshold and excludes activities already included in the critical trace."
+    )
+    method_float_basis = (
+        "Microsoft Project TotalSlack values are converted from tenths of a minute to days using the exported "
+        "MinutesPerDay value."
+        if _is_mspdi(current)
+        else "P6 total float values are read from TASK and converted from hours to days in Python using each activity's assigned CALENDAR.day_hr_cnt where available."
+    )
+
     return {
         "target_activity_id": target_aid,
         "target_task_name": name_by_activity.get(str(target_aid)),
@@ -1665,9 +1743,9 @@ def critical_path_to_target(
         "links": dedup_links,
         "method": {
             "name": "dag_two_tier_float_trace",
-            "description": "Treats TASK/TASKPRED as a DAG and traces backward from the target. Critical branches continue through predecessors whose total float is less than or equal to the current branch float within tolerance. If no predecessor matches the current branch float, the trace bridges only to the minimum-float predecessor(s) when a predecessor/successor calendar-context difference is detected and the current activity is not constraint-driven; this calendar bridge is independent of the near-critical threshold. Near-critical work is not path-traced; it is classified across non-summary current-schedule activities by P6 total float threshold and excludes activities already included in the critical trace.",
+            "description": method_description,
             "float_col": float_col,
-            "float_basis": "P6 total float values are read from TASK and converted from hours to days in Python using each activity's assigned CALENDAR.day_hr_cnt where available.",
+            "float_basis": method_float_basis,
             "date_math_guardrail": "Forecast/actual dates are context only; do not infer float, slack, or near-critical status from date gaps, weekends, or apparent gaps between linked activities.",
             "float_tolerance_days": float_tolerance_days,
             "critical_threshold_days": governing_critical_float_days,
@@ -1960,10 +2038,20 @@ def work_accomplished(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]
     end = current.data_date.normalize()
     if end < start:
         start, end = end, start
+    msp_period_unavailable = _is_mspdi(last) and _is_mspdi(current) and end <= start
+    msp_period_warning = (
+        "Microsoft Project StatusDate did not advance between the previous and current XML files; "
+        "period progress cannot be assessed."
+        if msp_period_unavailable
+        else None
+    )
 
     act_start_col, act_finish_col = _detect_actual_cols(current.task)
     if not act_start_col and not act_finish_col:
-        return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": 0, "activities": []}
+        result = {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": 0, "activities": []}
+        if msp_period_warning:
+            result.update({"period_assessment_available": False, "warning": msp_period_warning})
+        return result
 
     activity_id_col = _pick_col(current.task, ["task_code", "activity_id"])
     name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
@@ -2012,7 +2100,119 @@ def work_accomplished(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]
             deduped.append(a)
         activities = deduped
 
-    return {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": int(len(activities)), "activities": activities}
+    result = {"window": {"start": start.isoformat(), "end": end.isoformat()}, "count": int(len(activities)), "activities": activities}
+    if msp_period_warning:
+        result.update({"period_assessment_available": False, "warning": msp_period_warning})
+    return result
+
+
+def microsoft_project_progress_changes(last: XerSnapshot, current: XerSnapshot) -> dict[str, Any]:
+    """Compare MSPDI progress fields without altering the established XER progress logic."""
+    if not (_is_mspdi(last) and _is_mspdi(current)):
+        return {}
+
+    days_between = (
+        None
+        if last.data_date is None or current.data_date is None
+        else int((current.data_date.normalize() - last.data_date.normalize()).days)
+    )
+    assessment_available = days_between is not None and days_between > 0
+    warning = None
+    if not assessment_available:
+        warning = (
+            "Microsoft Project StatusDate must advance between XML updates to attribute progress to a reporting "
+            "period. The values below are file-version differences only."
+        )
+
+    aid_last = _pick_col(last.task, ["task_code", "activity_id"])
+    aid_current = _pick_col(current.task, ["task_code", "activity_id"])
+    if not aid_last or not aid_current:
+        return {
+            "period_assessment_available": assessment_available,
+            "days_between_status_dates": days_between,
+            "warning": warning or "Microsoft Project task identifiers are unavailable.",
+            "count": 0,
+            "items": [],
+        }
+
+    previous = {
+        str(row.get(aid_last, "")).strip(): row
+        for _, row in last.task.iterrows()
+        if str(row.get(aid_last, "")).strip()
+    }
+    name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
+    wbs_name_col = _pick_col(current.task, ["wbs_name"])
+    wbs_path_col = _pick_col(current.task, ["wbs_path"])
+    task_type_col = _pick_col(current.task, ["task_type", "task_type_code", "activity_type"])
+
+    def numeric(row: pd.Series, col: str) -> float | None:
+        if col not in row.index:
+            return None
+        value = pd.to_numeric(row.get(col), errors="coerce")
+        return None if pd.isna(value) else float(value)
+
+    items: list[dict[str, Any]] = []
+    for _, row in current.task.iterrows():
+        aid = str(row.get(aid_current, "")).strip()
+        before = previous.get(aid)
+        if before is None:
+            continue
+        if task_type_col:
+            task_type = str(row.get(task_type_col, "")).strip().casefold()
+            if any(token in task_type for token in ["wbs", "summary", "loe", "level of effort"]):
+                continue
+
+        pct_before = numeric(before, "msp_percent_complete")
+        pct_current = numeric(row, "msp_percent_complete")
+        physical_before = numeric(before, "msp_physical_percent_complete")
+        physical_current = numeric(row, "msp_physical_percent_complete")
+        remaining_before = numeric(before, "remain_drtn_hr_cnt")
+        remaining_current = numeric(row, "remain_drtn_hr_cnt")
+
+        pct_delta = None if pct_before is None or pct_current is None else pct_current - pct_before
+        physical_delta = (
+            None if physical_before is None or physical_current is None else physical_current - physical_before
+        )
+        remaining_delta = (
+            None if remaining_before is None or remaining_current is None else remaining_current - remaining_before
+        )
+        if not any(
+            delta is not None and abs(delta) > 1e-9
+            for delta in (pct_delta, physical_delta, remaining_delta)
+        ):
+            continue
+
+        items.append(
+            {
+                "task_name": _clean_optional(row.get(name_col)) if name_col else None,
+                "wbs_name": _clean_optional(row.get(wbs_name_col)) if wbs_name_col else None,
+                "wbs_path": _clean_optional(row.get(wbs_path_col)) if wbs_path_col else None,
+                "percent_complete_previous": pct_before,
+                "percent_complete_current": pct_current,
+                "percent_complete_change": pct_delta,
+                "physical_percent_complete_previous": physical_before,
+                "physical_percent_complete_current": physical_current,
+                "physical_percent_complete_change": physical_delta,
+                "remaining_duration_previous_hours": remaining_before,
+                "remaining_duration_current_hours": remaining_current,
+                "remaining_duration_change_hours": remaining_delta,
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            -float(item.get("percent_complete_change") or item.get("physical_percent_complete_change") or 0.0),
+            str(item.get("wbs_path") or ""),
+            str(item.get("task_name") or ""),
+        )
+    )
+    return {
+        "period_assessment_available": assessment_available,
+        "days_between_status_dates": days_between,
+        "warning": warning,
+        "count": len(items),
+        "items": items,
+    }
 
 
 def _clean_optional(value: Any) -> str | None:
@@ -2331,6 +2531,7 @@ def look_ahead_window_analysis(
     name_col = _pick_col(current.task, ["task_name", "task_title", "activity_name"])
     wbs_name_col = _pick_col(current.task, ["wbs_name"])
     wbs_path_col = _pick_col(current.task, ["wbs_path"])
+    task_type_col = _pick_col(current.task, ["task_type", "task_type_code", "activity_type"])
     act_start_col, act_finish_col = _detect_actual_cols(current.task)
 
     float_col = None
@@ -2356,6 +2557,10 @@ def look_ahead_window_analysis(
         aid = str(row.get(activity_id_col, "")).strip()
         if not aid or aid.lower() == "nan":
             continue
+        if _is_mspdi(current) and task_type_col:
+            task_type = str(row.get(task_type_col, "")).strip().casefold()
+            if any(token in task_type for token in ["wbs", "summary", "loe", "level of effort"]):
+                continue
 
         actual_finish = _parse_date(row.get(act_finish_col)) if act_finish_col else None
         if actual_finish is not None and actual_finish.normalize() < start:
@@ -3111,6 +3316,7 @@ def compare_three_way(
     wbs = wbs_monitor_change_and_delay(last, current, term=change_term)
     new_global = new_activities_all_wbs(last, current)
     accomplished = work_accomplished(last, current)
+    msp_progress = microsoft_project_progress_changes(last, current) if _is_mspdi(current) else None
     upstream_new_critical_links = upstream_new_activity_links_to_critical_path(
         current,
         new_global,
@@ -3139,7 +3345,7 @@ def compare_three_way(
         critical_path_activity_ids=critical_path_ids,
     )
 
-    return {
+    result = {
         "settings": {
             "variance_threshold": int(variance_threshold),
             "look_ahead_horizon_days": (None if look_ahead_horizon_days is None else int(look_ahead_horizon_days)),
@@ -3165,6 +3371,10 @@ def compare_three_way(
         "previous_critical_path_to_target": critical_path_last,
         "critical_path_to_target": critical_path,
     }
+    if _is_mspdi(current):
+        result["source_format"] = "mspdi_xml"
+        result["microsoft_project_progress_changes"] = msp_progress or {}
+    return result
 
 
 def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
@@ -3186,6 +3396,8 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
     critical_path = compare_result.get("critical_path_to_target", {}) or {}
     upstream_new_critical_links = compare_result.get("upstream_new_activity_links_to_critical_path", {}) or {}
     settings = compare_result.get("settings", {}) or {}
+    is_mspdi = compare_result.get("source_format") == "mspdi_xml"
+    msp_progress = compare_result.get("microsoft_project_progress_changes", {}) or {}
 
     def _without_activity_ids(value: Any) -> Any:
         id_keys = {"activity_id", "target_activity_id", "root_activity_id", "from_activity_id", "to_activity_id", "path_activity_ids"}
@@ -3691,7 +3903,11 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "completed": bool(item.get("completed")),
             "current_status": _activity_current_status(item),
             "calendar_name": item.get("calendar_name"),
-            "float_classification_basis": "precomputed_by_python_from_p6_total_float_and_activity_calendar",
+            "float_classification_basis": (
+                "precomputed_by_python_from_microsoft_project_totalslack_and_minutes_per_day"
+                if is_mspdi
+                else "precomputed_by_python_from_p6_total_float_and_activity_calendar"
+            ),
         }
         constraint_driver = _constraint_driver_fact(item.get("constraint_driver"))
         if constraint_driver:
@@ -4638,11 +4854,19 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "look_ahead_horizon_days": settings.get("look_ahead_horizon_days"),
         "change_term": settings.get("change_term"),
     }
-    date_math_guardrail_summary = {
-        "rule": "Critical and near-critical status is precomputed by Python from P6 total float, not inferred from activity date gaps.",
-        "float_conversion": "Python converts P6 total float to days using each activity's assigned calendar before the JSON is sent to the LLM.",
-        "llm_instruction": "Do not calculate slack, float, or driving status from forecast/actual dates, weekends, holidays, or apparent gaps between predecessor and successor dates.",
-    }
+    if is_mspdi:
+        settings_summary["schedule_source"] = "microsoft_project_xml"
+        date_math_guardrail_summary = {
+            "rule": "Critical and near-critical status is precomputed by Python from Microsoft Project TotalSlack, not inferred from activity date gaps.",
+            "float_conversion": "Python converts Microsoft Project TotalSlack from tenths of a minute to days using the exported MinutesPerDay value before the JSON is sent to the LLM.",
+            "llm_instruction": "Do not calculate slack, float, or driving status from forecast/actual dates, weekends, holidays, or apparent gaps between predecessor and successor dates.",
+        }
+    else:
+        date_math_guardrail_summary = {
+            "rule": "Critical and near-critical status is precomputed by Python from P6 total float, not inferred from activity date gaps.",
+            "float_conversion": "Python converts P6 total float to days using each activity's assigned calendar before the JSON is sent to the LLM.",
+            "llm_instruction": "Do not calculate slack, float, or driving status from forecast/actual dates, weekends, holidays, or apparent gaps between predecessor and successor dates.",
+        }
     update_period_summary = {
         "baseline_data_date": update_period.get("baseline_data_date"),
         "last_data_date": update_period.get("last_data_date"),
@@ -4664,6 +4888,8 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "count": trending.get("eroding_risk_count"),
         "items": eroding,
     }
+    if is_mspdi and trending.get("erosion_assessment_warning"):
+        eroding_risks_summary["erosion_assessment_warning"] = trending.get("erosion_assessment_warning")
     near_critical_grouped_summary = _group_near_critical(trending)
     new_activities_global_summary = {
         "count": new_global.get("count"),
@@ -4673,6 +4899,21 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "items": new_global_items,
     }
     actualized_work_summary = _summarize_actualized_work(accomplished)
+    if is_mspdi and accomplished.get("period_assessment_available") is False:
+        actualized_work_summary["period_assessment_available"] = False
+        actualized_work_summary["warning"] = accomplished.get("warning")
+    msp_progress_summary: dict[str, Any] = {}
+    if is_mspdi:
+        msp_items = msp_progress.get("items", []) or []
+        msp_progress_summary = {
+            "period_assessment_available": msp_progress.get("period_assessment_available"),
+            "days_between_status_dates": msp_progress.get("days_between_status_dates"),
+            "warning": msp_progress.get("warning"),
+            "count": msp_progress.get("count"),
+            "items": msp_items[:30],
+            "items_shown_count": min(len(msp_items), 30),
+            "items_omitted_count": max(0, len(msp_items) - 30),
+        }
     in_progress_finish_extensions_summary = _summarize_finish_extensions(finish_extensions)
     global_new_scope_summary = {
         "count": new_activities_global_summary.get("count"),
@@ -4762,7 +5003,11 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         **critical_sequence_role_summary,
     }
     precomputed_float_buckets_summary = {
-        "classification_source": "python_precomputed_from_p6_total_float_and_activity_calendar",
+        "classification_source": (
+            "python_precomputed_from_microsoft_project_totalslack_and_minutes_per_day"
+            if is_mspdi
+            else "python_precomputed_from_p6_total_float_and_activity_calendar"
+        ),
         "date_math_rule": "Never infer float, slack, criticality, or driving status from dates or apparent gaps.",
         "sequence_language_rule": critical_sequence_role_summary.get("driver_language_rule"),
         "critical_threshold_days": critical_path.get("least_float_current_days"),
@@ -4785,8 +5030,16 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
         "near_critical_group_count": near_critical_grouped_summary.get("group_count"),
         "excluded_critical_trace_activity_count": near_critical_grouped_summary.get("excluded_activity_count"),
         "near_critical_bucket_rule": (
-            "Near-critical activities are selected by P6 total float only: greater than the critical threshold and "
-            "less than or equal to the near-critical threshold, excluding activities already included in the Section 4 critical trace."
+            (
+                "Near-critical activities are selected by Microsoft Project TotalSlack only: greater than the critical "
+                "threshold and less than or equal to the near-critical threshold, excluding activities already included "
+                "in the Section 4 critical trace."
+            )
+            if is_mspdi
+            else (
+                "Near-critical activities are selected by P6 total float only: greater than the critical threshold and "
+                "less than or equal to the near-critical threshold, excluding activities already included in the Section 4 critical trace."
+            )
         ),
     }
     actualized_work_focus_summary = _progress_focus(actualized_work_summary)
@@ -5066,22 +5319,32 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             },
         },
     }
+    if is_mspdi:
+        digest["schedule_source"] = "mspdi_xml"
+        progress_section = digest["report_sections"]["section_2_strategic_progress_achievements"]
+        progress_section["period_context"]["period_assessment_available"] = msp_progress_summary.get(
+            "period_assessment_available"
+        )
+        progress_section["period_context"]["warning"] = msp_progress_summary.get("warning") or accomplished.get(
+            "warning"
+        )
+        progress_section["microsoft_project_progress_changes"] = msp_progress_summary
     return _without_activity_ids(digest)
 
 
 def _main() -> int:
-    p = argparse.ArgumentParser(description="Three-way Primavera P6 XER comparison (Baseline vs Last vs Current).")
-    p.add_argument("baseline_xer", help="Path to baseline .XER")
-    p.add_argument("last_xer", help="Path to last update .XER")
-    p.add_argument("current_xer", help="Path to current .XER")
+    p = argparse.ArgumentParser(description="Three-way schedule comparison (Baseline vs Last vs Current).")
+    p.add_argument("baseline_xer", help="Path to baseline .XER or Microsoft Project .XML")
+    p.add_argument("last_xer", help="Path to last update .XER or Microsoft Project .XML")
+    p.add_argument("current_xer", help="Path to current .XER or Microsoft Project .XML")
     p.add_argument("--target-activity-id", required=True, help="Milestone/target activity (task_code/name/task_id)")
     p.add_argument("--variance-threshold", required=True, type=int, help="Near-critical threshold above least float")
     p.add_argument("--change-term", default="change", help="Term used to identify the Change/Delay WBS section")
     args = p.parse_args()
 
-    baseline = snapshot_from_xer_path("baseline", args.baseline_xer)
-    last = snapshot_from_xer_path("last", args.last_xer)
-    current = snapshot_from_xer_path("current", args.current_xer)
+    baseline = snapshot_from_schedule_path("baseline", args.baseline_xer)
+    last = snapshot_from_schedule_path("last", args.last_xer)
+    current = snapshot_from_schedule_path("current", args.current_xer)
 
     out = compare_three_way(
         baseline,
