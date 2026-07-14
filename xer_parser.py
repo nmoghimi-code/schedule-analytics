@@ -214,7 +214,9 @@ def add_full_wbs_path(
     name_by_id = dict(zip(w["_wid"].astype(str), w["_wname"].astype(str), strict=False))
     parent_by_id = dict(zip(w["_wid"].astype(str), w["_pid"].astype(str), strict=False))
     for k, v in list(parent_by_id.items()):
-        if not v or v.lower() == "nan":
+        # pandas 3 keeps missing values as floating NaN in its string dtype,
+        # including after astype(str). Normalize before using string methods.
+        if pd.isna(v) or not str(v).strip() or str(v).strip().casefold() in {"nan", "none", "<na>"}:
             parent_by_id[k] = ""
 
     path_cache: dict[str, str] = {}
