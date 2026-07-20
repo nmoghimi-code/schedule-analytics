@@ -310,11 +310,13 @@ Required narrative structure:
 
 2) Strategic Progress & Achievements
    - Use report_sections.section_2_strategic_progress_achievements.
-   - Start from narrative_focus.actualized_work.top_progress_groups before using the raw actualized_work.groups.
-   - Summarize activities that were actualized between the previous and current update using actualized_work.groups. "Actualized" means actual start and/or actual finish occurred within period_context.window.
+   - Use narrative_focus.actualized_work.all_progress_groups as the authoritative progress-area list. Mention EVERY listed area at least once; do not omit an area because the schedule is large or because another area has more activity. The raw actualized_work.groups list may be capped, but all_progress_groups is complete.
+   - Summarize activities that were actualized between the previous and current update. "Actualized" means actual start and/or actual finish occurred within period_context.window. Use all_progress_groups for complete area coverage and use raw actualized_work.groups only for additional representative detail where available.
    - Group progress by location, phase, WBS area, discipline, or work type. Do not list each activity.
    - Use group-level started_count and finished_count to describe the scale of progress.
    - Use each group's wbs_path, leaf_wbs_path, wbs_hierarchy_root_to_leaf, and representative activity names to preserve exact supported locations/levels/areas. If level/floor/location detail is visible, state the exact range or furthest progressed point instead of saying "multiple floors" or "across areas."
+   - Within each progress area, describe completed work first using completed_task_examples / completed_count, then describe work that started and remains ongoing using ongoing_task_examples / ongoing_count. Preferred pattern: "Rough-ins were completed on Level 1, while boarding and blockwork are underway." Adapt the wording to the supported activity names and counts.
+   - Do not call an activity ongoing when it has an actual finish. If an area has only completions or only ongoing starts, state only the supported category. If examples are capped or unavailable, still mention the area using its counts.
    - Mention meaningful completed/started work and any visible quality/safety/control milestones only if supported by activity names.
    - Also summarize narrative_focus.in_progress_finish_extensions.top_extension_groups and in_progress_finish_extensions.groups: activities that were expected to finish in this update window but remain in progress and have a later current forecast finish.
    - For finish extensions, describe the affected grouped areas, exact available locations/levels, and the scale of movement; do not name every activity.

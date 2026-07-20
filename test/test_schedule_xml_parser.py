@@ -241,6 +241,55 @@ class XerIsolationTests(unittest.TestCase):
         self.assertIn("P6 total float", json.dumps(digest))
 
 
+class NarrativeProgressDigestTests(unittest.TestCase):
+    def test_every_actualized_wbs_area_is_kept_and_completion_precedes_ongoing_data(self) -> None:
+        activities = []
+        for index in range(30):
+            area = f"Area {index:02d}"
+            wbs_path = f"Project / Building / {area}"
+            activities.extend(
+                [
+                    {
+                        "activity_id": f"FIN-{index}",
+                        "task_name": f"Completed work {index}",
+                        "wbs_name": area,
+                        "wbs_path": wbs_path,
+                        "actual_start_date": "2026-07-02T00:00:00",
+                        "actual_finish_date": "2026-07-05T00:00:00",
+                    },
+                    {
+                        "activity_id": f"ACT-{index}",
+                        "task_name": f"Ongoing work {index}",
+                        "wbs_name": area,
+                        "wbs_path": wbs_path,
+                        "actual_start_date": "2026-07-08T00:00:00",
+                        "actual_finish_date": None,
+                    },
+                ]
+            )
+
+        digest = xc.get_ai_ready_digest(
+            {
+                "work_accomplished": {
+                    "window": {"start": "2026-07-01T00:00:00", "end": "2026-07-10T00:00:00"},
+                    "count": len(activities),
+                    "activities": activities,
+                }
+            }
+        )
+        section = digest["report_sections"]["section_2_strategic_progress_achievements"]
+        focus = section["narrative_focus"]["actualized_work"]
+
+        self.assertEqual(focus["progress_area_count"], 30)
+        self.assertEqual(len(focus["all_progress_groups"]), 30)
+        self.assertEqual(section["actualized_work"]["groups_omitted_count"], 5)
+        first_area = focus["all_progress_groups"][0]
+        self.assertEqual(first_area["completed_count"], 1)
+        self.assertEqual(first_area["ongoing_count"], 1)
+        self.assertEqual(first_area["completed_task_examples"], ["Completed work 0"])
+        self.assertEqual(first_area["ongoing_task_examples"], ["Ongoing work 0"])
+
+
 class XmlFormatDetectionTests(unittest.TestCase):
     def test_supplied_primavera_xml_is_not_mspdi(self) -> None:
         fixtures = sorted(

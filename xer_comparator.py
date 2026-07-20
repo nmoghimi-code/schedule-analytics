@@ -4360,18 +4360,24 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    def _progress_focus(summary: Mapping[str, Any], *, max_groups: int = 6) -> dict[str, Any]:
-        highlights = []
-        for group in (summary.get("groups") or [])[:max_groups]:
+    def _progress_focus(summary: Mapping[str, Any]) -> dict[str, Any]:
+        all_progress_groups = []
+        for group in summary.get("groups") or []:
             items = group.get("items") or []
             started_and_finished = []
             started_only = []
             finished_only = []
+            completed = []
+            ongoing = []
             for item in items:
                 events = set(item.get("progress_events") or [])
                 name = _clean_digest_value(item.get("task_name"))
                 if not name:
                     continue
+                if "actual_finish" in events:
+                    completed.append(name)
+                elif "actual_start" in events and not _clean_digest_value(item.get("actual_finish_date")):
+                    ongoing.append(name)
                 if {"actual_start", "actual_finish"}.issubset(events):
                     started_and_finished.append(name)
                 elif "actual_start" in events:
@@ -4379,13 +4385,19 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
                 elif "actual_finish" in events:
                     finished_only.append(name)
 
-            highlights.append(
+            all_progress_groups.append(
                 {
                     "area": _compact_wbs_context(group),
                     "leaf_wbs_name": group.get("leaf_wbs_name"),
+                    "leaf_wbs_path": group.get("leaf_wbs_path"),
+                    "wbs_hierarchy_root_to_leaf": group.get("wbs_hierarchy_root_to_leaf"),
                     "started_count": group.get("started_count"),
                     "finished_count": group.get("finished_count"),
                     "started_and_finished_count": group.get("started_and_finished_count"),
+                    "completed_count": len(completed),
+                    "ongoing_count": len(ongoing),
+                    "completed_task_examples": completed[:5],
+                    "ongoing_task_examples": ongoing[:5],
                     "started_and_finished_examples": started_and_finished[:5],
                     "started_not_finished_examples": started_only[:5],
                     "finished_only_examples": finished_only[:5],
@@ -4396,7 +4408,10 @@ def get_ai_ready_digest(compare_result: Mapping[str, Any]) -> dict[str, Any]:
             "total_started_count": summary.get("started_count"),
             "total_finished_count": summary.get("finished_count"),
             "total_started_and_finished_count": summary.get("started_and_finished_count"),
-            "top_progress_groups": highlights,
+            "progress_area_count": len(all_progress_groups),
+            # This deliberately contains every WBS area where an actual start and/or actual finish
+            # occurred in the update window. It is not subject to the general 25-group AI payload cap.
+            "all_progress_groups": all_progress_groups,
         }
 
     def _finish_extension_focus(summary: Mapping[str, Any], *, max_groups: int = 6) -> dict[str, Any]:
